@@ -7,10 +7,14 @@ import api_coinbase
 import signal
 import time
 import json
+import os
 
 import pandas as pd
 # pd.options.mode.chained_assignment = None  # default='warn'
 pd.options.display.float_format = '{:.6f}'.format
+
+#======================================================================================
+# Webhook Parameters
 
 ENDPOINT = 'wss://ws-feed.exchange.coinbase.com'
 TICKERS = ['BTC-USD', 'ETH-USD']
@@ -20,10 +24,25 @@ FREQUENCY = '1T'
 SAVE_CSV = True
 SAVE_HD5 = False
 
-#logging.disable(logging.DEBUG)
+#======================================================================================
+# Configure Logging
+
+log_f = 'webhook_coinbase_match_log'
+i = 0
+while os.path.exists(f"{log_f}_{i}.log"):
+    i += 1
+log_f = f"{log_f}_{i}.log"
+
+# logging.disable(logging.DEBUG)
 logging.basicConfig(level=logging.DEBUG,
-                    format='%(levelname)s (%(threadName)-10s) %(message)s',
-                    filename='my_log.log')
+                    format='%(asctime)s %(levelname)s (%(threadName)-10s) %(message)s',
+                    handlers=[
+                        logging.FileHandler(rf"logs\{log_f}s"),
+                        logging.StreamHandler()
+                    ],
+                    force=True)
+
+#======================================================================================
 
 class GracefulKiller:
     """Help kill threads when stop called."""
