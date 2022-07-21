@@ -18,6 +18,7 @@ import sys
 import itertools
 from collections import defaultdict
 import re
+from pathlib import Path
 
 import pandas as pd
 pd.options.display.float_format = '{:.6f}'.format
@@ -27,7 +28,7 @@ pd.options.display.float_format = '{:.6f}'.format
 
 EXCHANGE = "Coinbase"
 ENDPOINT = 'wss://ws-feed.exchange.coinbase.com'
-MARKETS = ('BTC-USD', 'ETH-USD')
+MARKETS = ('BTC-USD', 'ETH-USD', 'SNX-USD', 'CRV-USD')
 CHANNELS = ('matches', )
 # MARKETS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
 #           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
@@ -42,11 +43,18 @@ BUILD_CANDLES = True
 # ======================================================================================
 # Configure logger
 
+# remove default loguru logger
+logger.remove()
 
+# add file logger with full debug
 logger.add(
-    "logs\\coinbase_webhook_match_log_{time}.log",
-    enqueue=False, colorize=False, level="DEBUG",
-    # format="<white>{time} {thread}</white> <level>{message}</level>"
+    "logs\\coinbase_webhook_match_log_{time}.log", level="DEBUG"
+)
+
+# add console logger with formatting
+logger.add(
+    sys.stdout, enqueue=True, level="DEBUG",
+    format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS} --- {level} | Thread {thread}</white> <level>{message}</level>"
 )
 
 # ======================================================================================
@@ -142,10 +150,10 @@ class WebsocketClient:
             item = pd.DataFrame(columns=self.relevant_msg_fields, data=[_msg])
             return item
 
-        # elif "type" in _msg and _msg["type"] == "subscriptions":
-        #     line_output = f"Subscribed to '{_msg['channels'][0]['name']}' channel "
-        #     line_output += f"for {_msg['channels'][0]['product_ids'][0]}"
-        #     s_print(line_output)
+        elif "type" in _msg and _msg["type"] == "subscriptions":
+            line_output = f"Subscribed to '{_msg['channels'][0]['name']}' channel "
+            line_output += f"for {_msg['channels'][0]['product_ids'][0]}"
+            s_print(line_output)
 
         else:
             s_print(msg)
@@ -210,6 +218,9 @@ class WebsocketClientHandler:
         if start_immediately:
             self.start(websocket_client)
 
+    def remove(self, websocket_client: WebsocketClient) -> None:
+        self.websocket_clients.remove(websocket_client)
+
     def start(self, websocket_client) -> None:
         websocket_client.start_thread()
         self.active.append(websocket_client.id)
@@ -234,19 +245,31 @@ class WebsocketClientHandler:
 
     def check_finished(self) -> None:
         while len(self.active) != 0:
+            logger.debug(f"Active websockets: {self.active}")
             for websocket_client in self.websocket_clients:
                 if not websocket_client.running:
+                    logger.debug(f"{websocket_client.id} has stopped running.")
                     try:
+                        logger.debug(f"Removing {websocket_client.id} from actives.")
                         self.active.remove(websocket_client.id)
-                        logger.info(f"Websocket thread {websocket_client.id} has finished.")
-                        logger.info(f"{len(self.active)} thread(s) remaining: ", *self.active)
-                    except Exception(ValueError) as e:
+                        logger.info(f"{len(self.active)} thread(s) remaining.")
+                    except Exception as e:
                         logger.debug(e)
                         pass
+                else:
+                    logger.debug(f"{websocket_client.id} is still running.")
+
+            for websocket_client in self.websocket_clients:
+                if websocket_client.id not in self.active:
+                    self.websocket_clients.remove(websocket_client)
+
+            logger.info(f"Checking again in 10 seconds.")
+            time.sleep(10)
 
     def websocket_thread_keepalive(self, interval=60) -> None:
         time.sleep(interval)
         while self.websockets_open:
+            logger.debug(f"Active websockets: {self.active}")
             for i, websocket_client in enumerate(self.websocket_clients):
                 if websocket_client.running:
                     try:
@@ -282,6 +305,7 @@ class WorkerDataFrame:
         self.filename_args = None
         self.filename = None
         self.total_items = 0
+        self.path = Path("/data")
 
     def clear(self) -> None:  # return clear dataframe
         self.df = self.df.iloc[0:0]
@@ -298,34 +322,62 @@ class WorkerDataFrame:
         self.df = pd.concat([self.df, data])
         self.total_items += 1
 
-    def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename: bool = False) -> None:
+    def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename_flag: bool = False) -> None:
         """Save dataframe chunk using append."""
 
         if self.is_empty:  # filename can't be derived if dataframe is empty
+            logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")
             return
 
-        file_exists = os.path.exists(rf"data\{self.filename}.csv")
+        file_exists = Path(f"data/{self.filename}").is_file()
 
-        if not file_exists:  # Append with headers only if file doesn't exist yet
+        if self.filename is not None:
+            logger.debug(f"data/{self.filename} exists: {file_exists}")
+
+            if not file_exists:
+                logger.debug(f"{self.filename} doesn't exist. Creating new one...")
+                header = True
+                self.derive_df_filename()
+            else:
+                logger.debug(f"OK... File exists. Header set to False.")
+                header = False
+
+        else:  # append with headers only if file doesn't exist yet.
+            logger.debug(f"No filename generated for {self.df_type} dataframe yet.")
+            logger.debug(f"Setting header to True and deriving new filename...")
             header = True
-            self.derive_df_filename()  # derive a filename if first save
-        else:
-            header = False
-
-        if update_filename and file_exists:  # rename when update_filename=True (should only trigger at end)
-            prev_filename = self.filename
             self.derive_df_filename()
-            os.rename(prev_filename, self.filename)
 
         if csv:
-            self.filename = self.filename + ".csv"
-            self.df.to_csv(rf"data\{self.filename}", index=False, mode='a', header=header)
-            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.csv.")
+
+            if Path(f"data/{self.filename}").suffix != '.csv':  # append extension if doesn't exist
+                self.filename = self.filename + ".csv"
+
+            if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
+                logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
+                self.update_filename(extension='.csv')
+
+            self.df.to_csv(rf"data/{self.filename}", index=False, mode='a', header=header)
+            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.")
 
         if hdf:
-            self.filename = self.filename + ".hdf"
-            self.df.to_hdf(rf"data\{self.filename}", key='df', mode='a')
-            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.hdf.")
+
+            if Path(f"data/{self.filename}").suffix != '.hdf':  # append extension if doesn't exist
+                self.filename = self.filename + ".hdf"
+
+            if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
+                logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
+                self.update_filename(extension='.hdf')
+
+            self.df.to_hdf(rf"data/{self.filename}", key='df', mode='a')
+            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.")
+            
+    def update_filename(self, extension: str) -> None:
+        prev_filename = self.filename
+        self.derive_df_filename()
+        self.filename = self.filename + extension
+        os.rename(f"data/{prev_filename}", f"data/{self.filename})")
+        logger.debug(f"Renamed file from {prev_filename} to {self.filename}...")
 
     def derive_df_filename(self) -> None:
 
@@ -509,7 +561,7 @@ class QueueWorker:
         avg_qsize = sum(self.queue_stats["queue_sizes"]) / len(self.queue_stats["queue_sizes"])
         elapsed_time = min(self.timer.elapsed(), 1000*self.save_interval)
         if _print:
-            logger.info(f"Average queue size over {self.timer.elapsed(hms_format=True)} seconds: {avg_qsize}")
+            logger.info(f"Average queue size over {self.timer.elapsed(hms_format=True)} seconds: {avg_qsize:.2f}")
         self.queue_stats["avg_qsize"].append(avg_qsize)
         # keep track of the last 1000 queue sizes (so 10k seconds)
         self.queue_stats["queue_sizes"] = self.queue_stats["queue_sizes"][-1000:]
@@ -535,7 +587,7 @@ class QueueWorker:
                 if not final:
                     wdf.save_chunk()
                 else:
-                    wdf.save_chunk(update_filename=True)
+                    wdf.save_chunk(update_filename_flag=True)
             if not self.store_df_in_mem:
                 wdf.clear()
 
