@@ -1,21 +1,23 @@
 """Open authenticated websocket(s) to Coinbase's MATCH channel."""
-# Todo: Add abstractions and refactor into classes where possible
-# i.e. websocket class
-# dataframe class with custom properties including filename, data type
 # Todo: Refactor functions out into separate modules
 # Todo: Add additional error handling (?)
+from loguru import logger
+from termcolor import colored
+import threading
 from datetime import datetime
 from threading import Thread, Lock
 from websocket import create_connection, WebSocketConnectionClosedException
-import logging
 import api_coinbase
 import signal
 import time
 import json
-import os
 import queue
 from helper_tools import Timer
-import math
+import os
+import sys
+import itertools
+from collections import defaultdict
+import re
 
 import pandas as pd
 pd.options.display.float_format = '{:.6f}'.format
@@ -23,45 +25,37 @@ pd.options.display.float_format = '{:.6f}'.format
 # ======================================================================================
 # Webhook Parameters
 
+EXCHANGE = "Coinbase"
 ENDPOINT = 'wss://ws-feed.exchange.coinbase.com'
-# TICKERS = ('BTC-USD', 'ETH-USD')
-TICKERS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
-           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
+MARKETS = ('BTC-USD', 'ETH-USD')
+CHANNELS = ('matches', )
+# MARKETS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
+#           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
 FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
 SAVE_CSV = True
-SAVE_HD5 = False #Todo: add SAVE_HD5 function
-k = 360  # Save dataframe into CSV every k seconds
+SAVE_HD5 = False  # Todo: Test this
+SAVE_INTERVAL = 360
+STORE_FEED_IN_MEMORY = False
+BUILD_CANDLES = True
 
 # ======================================================================================
-# Configure Logging
+# Configure logger
 
-log_f = 'webhook_coinbase_match_log'
-_i = 0
-while os.path.exists(rf"logs\{log_f}_{_i}.log"):
-    _i += 1
-log_f = rf"logs\{log_f}_{_i}.log"
 
-logging.disable(logging.DEBUG)
-logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s %(levelname)s (%(threadName)-10s) %(message)s',
-                    handlers=[
-                        logging.FileHandler(log_f),
-                        logging.StreamHandler()
-                    ],
-                    force=True)
+logger.add(
+    "logs\\coinbase_webhook_match_log_{time}.log",
+    enqueue=False, colorize=False, level="DEBUG",
+    # format="<white>{time} {thread}</white> <level>{message}</level>"
+)
 
 # ======================================================================================
 
-
-class UnknownDataframeTypeError(Exception):
-    def __init__(self, value):
-        self.value = value
-
-    def __str__(self):
-        return repr(self.value)
-
-    pass
+s_print_lock = Lock()
+def s_print(*args, **kwargs):
+    """Thread-safe print function with colors."""
+    with s_print_lock:
+        print(*args, **kwargs)
 
 
 class GracefulKiller:
@@ -70,381 +64,569 @@ class GracefulKiller:
 
     def __init__(self):
         signal.signal(signal.SIGINT, self.exit_gracefully)
-        signal.signal(signal.SIGBREAK, self.exit_gracefully)
         signal.signal(signal.SIGTERM, self.exit_gracefully)
+        if sys.platform == 'win32':
+            signal.signal(signal.SIGBREAK, self.exit_gracefully)
 
     def exit_gracefully(self, *args):
-        logging.critical(f"Stop triggered. Ending threads.............................")
+        logger.critical("Stop signal sent. Stopping threads.............................")
         self.kill_now = True
 
 
-s_print_lock = Lock()
-result_lock = Lock()
+class WebsocketClient:
+    def __init__(self, channel: str, market: str, data_queue: queue.Queue) -> None:
+        self.channel = channel
+        self.market = market
+        self.data_queue = data_queue
+        self.id = self.channel + '_' + self.market
+        self.ws = None
+        self.ws_url = ENDPOINT
+        self.user = api_coinbase.get_user()
+        self.thread = None
+        self.thread_id = None
+        self.running = None
+        self.kill = False
+        self.relevant_msg_fields = ("type", "time", "product_id", "side", "size", "price",)
 
-
-def s_print(*a, **b):
-    """Thread-safe print function."""
-    with s_print_lock:
-        print(*a, **b)
-
-
-def main():
-    active_threads = []
-    ws = [None] * len(TICKERS)
-    match_types = {'match', 'last_match'}
-
-    data_col = ("type", "time", "ticker", "side", "size", "price")
-    data = pd.DataFrame(columns=data_col)
-
-    candle_col = ("type", "ticker", "candle", "frequency", "open", "high", "low", "close", "volume")
-    candles = pd.DataFrame(columns=candle_col)
-
-    # shortened version of tickers for output filename
-    all_symbols = ','.join([t[:t.find("-")] for t in TICKERS])
-
-    df_queue = queue.Queue()
-
-    websockets_open = True
-
-    def websocket_thread(ws, ticker, i, data_col, candle_col):
-        nonlocal websockets_open, df_queue
-        ws[i] = create_connection(ENDPOINT)
-        ws[i].send(
+    def websocket_thread(self) -> None:
+        self.ws = create_connection(self.ws_url)
+        self.thread_id = threading.current_thread().ident
+        self.ws.send(
             json.dumps(
                 {
                     "type": "subscribe",
                     "Sec-WebSocket-Extensions": "permessage-deflate",
-                    "user_id": user["legacy_id"],
-                    "profile_id": user["id"],
-                    "product_ids": [ticker],
-                    "channels": ["matches"]
+                    "user_id": self.user["legacy_id"],
+                    "profile_id": self.user["id"],
+                    "product_ids": [self.market],
+                    "channels": [self.channel]
                 }
             )
         )
 
-        if not thread_keepalive.is_alive():
-            thread_keepalive.start()
+        self.running = True
 
-        # needed for first iteration over main websocket loop
-        last_candle = None
-
-        # main websocket loop
-        while not killer.kill_now:
-            feed = None
+        feed = None
+        while not self.kill:
             try:
-                feed = ws[i].recv()
+                feed = self.ws.recv()
                 if feed:
                     msg = json.loads(feed)
                 else:
                     msg = {}
             except (ValueError, KeyboardInterrupt, Exception) as e:
-                logging.debug(e)
-                logging.debug(f"{e} - data: {feed}")
+                logger.debug(e)
+                logger.debug(f"{e} - data: {feed}")
                 break
             else:
-
-                # logging.debug(f"msg.get(`type`) = {msg.get('type')}")
-
-                if msg.get("type") not in match_types:
-
-                    if msg.get("type") == "subscriptions":
-                        logging.info(msg)
-                    else:
-                        logging.warning(f"Unfamiliar msg type:\n{msg}")
-
-                else: # parse data from msg and place into dataframes
-
-                    _time = datetime.strptime(msg.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
-                    _id = msg.get('product_id')
-                    _side = msg.get('side')
-                    _size = float(msg.get('size'))
-                    _price = float(msg.get('price'))
-                    s_print(f"Thread {i} - {_time} --- {_side} {_size} {_id} at ${_price:,}")
-
-                    # (re)initialize temp dataframe for concatenation to main dataframe
-                    df = pd.DataFrame(columns=data_col,
-                                      data=[[msg.get("type"), _time, _id, _side, _size, _price]])
-
-                    # numpy datetime type
-                    df["time"].astype("datetime64[ns]")
-
-                    # place temp match dataframe into queue
-                    df_queue.put(df)
-
-                    candle = df["time"].dt.floor(freq=FREQUENCY)[0] # floor time at chosen frequency
-
-                    # build candles
-                    # should get skipped on first loop since last_candle is None until end of first loop
-                    if last_candle is not None and candle != last_candle:
-                        # if candle is new, concat into main candles dataframe and reset temp dataframe
-                        logging.debug("-----New Candle-----")
-
-                        df_c = pd.DataFrame(columns=candle_col,
-                                            data=[["candle", ticker, last_candle, FREQUENCY,
-                                                   _open, high, low, close, volume]])
-
-                        # logging.debug(df_c)
-
-                        # place temp candle dataframe into queue
-                        df_queue.put(df_c)
-
-                    if candle != last_candle:
-                        _open = _price
-                        high = _price
-                        low = _price
-                        close = _price
-                        volume = _size
-
-                    else: # if candle not new, update high, low, close, and volume
-                        high = max(high, _price)
-                        low = min(low, _price)
-                        close = _price
-                        volume = volume + _size
-
-                    last_candle = candle
-
-        logging.debug(f"Websocket thread loop for {ticker} ended.")
+                item = self.parse_msg(msg)
+                self.data_queue.put(item)
 
         # close websocket
         try:
-            if ws[i]:
-                ws[i].close()
+            if self.ws:
+                self.ws.close()
         except WebSocketConnectionClosedException:
             pass
 
-        logging.info(f"Ended websocket thread for {ticker}.")
+        logger.info(f"Closed websocket for {self.id}.")
+        self.running = False
 
-    def websocket_thread_keepalive(interval=60):
+    def parse_msg(self, msg: dict) -> pd.DataFrame:
+        _msg = {key: value for key, value in msg.items() if key in self.relevant_msg_fields}
+        if "time" in _msg:
+            _msg["time"] = datetime.strptime(msg.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
+
+        if "type" in _msg and _msg["type"] in {"last_match", "match"}:
+            self.display_match(_msg)
+            item = pd.DataFrame(columns=self.relevant_msg_fields, data=[_msg])
+            return item
+
+        # elif "type" in _msg and _msg["type"] == "subscriptions":
+        #     line_output = f"Subscribed to '{_msg['channels'][0]['name']}' channel "
+        #     line_output += f"for {_msg['channels'][0]['product_ids'][0]}"
+        #     s_print(line_output)
+
+        else:
+            s_print(msg)
+
+    def display_match(self, _msg) -> None:
+
+        # build text
+        line_output_0 = f"Thread {self.thread_id} - "
+        line_output_1 = f"{_msg['time']} --- "
+        line_output_2 = f"{_msg['side']} "
+        line_output_3 = f"{_msg['size']} {_msg['product_id']} at ${float(_msg['price']):,}"
+
+        # calc volume
+        usd_volume = float(_msg['size']) * float(_msg['price'])
+        line_output_right = f"${usd_volume:,.2f}"
+
+        # handle colors
+        line_output_0 = colored(line_output_0, "grey")
+        if _msg["side"] == "buy":
+            line_output_2 = colored(line_output_2, "green")
+            line_output_right = colored(line_output_right, "green")
+        elif _msg["side"] == "sell":
+            line_output_2 = colored(line_output_2, "red")
+            line_output_right = colored(line_output_right, "red")
+
+        # alignment
+        line_output_left = line_output_1 + line_output_2 + line_output_3
+        line_output = f"{line_output_left:<80}{line_output_right:>25}"
+
+        s_print(line_output)
+
+    def start_thread(self) -> None:
+        logger.info(f"Starting websocket thread for {self.id}....")
+        self.thread = Thread(target=self.websocket_thread)
+        self.thread.start()
+
+    def kill_thread(self) -> None:
+        logger.info(f"Killing websocket thread for {self.id}...")
+        self.kill = True
+
+    def ping(self, string: str = "keepalive") -> None:
+        self.ws.ping("keepalive")
+
+    @property
+    def is_running(self) -> bool:
+        return self.running
+
+    @property
+    def kill_sent(self) -> bool:
+        return self.kill
+
+
+class WebsocketClientHandler:
+    def __init__(self) -> None:
+        self.websocket_clients = []
+        self.active = []
+        self.websocket_keepalive = Thread(target=self.websocket_thread_keepalive, daemon=True)
+        self.kill_signal_sent = False
+
+    def add(self, websocket_client: WebsocketClient, start_immediately: bool = True) -> None:
+        self.websocket_clients.append(websocket_client)
+        if start_immediately:
+            self.start(websocket_client)
+
+    def start(self, websocket_client) -> None:
+        websocket_client.start_thread()
+        self.active.append(websocket_client.id)
+        if not self.websocket_keepalive.is_alive():  # start keepalive thread
+            self.websocket_keepalive.start()
+
+    def start_all(self) -> None:
+        print(f"Starting websocket threads for: {[x.id for x in self.websocket_clients]}")
+        for websocket_client in self.websocket_clients:
+            self.start(websocket_client)
+
+    def kill(self, websocket_client) -> None:
+        websocket_client.kill_thread()
+        self.kill_signal_sent = True
+
+    def kill_all(self) -> None:
+        logger.info(f"Killing all websocket threads...")
+        for websocket_client in self.websocket_clients:
+            self.kill(websocket_client)
+        time.sleep(1)
+        self.check_finished()
+
+    def check_finished(self) -> None:
+        while len(self.active) != 0:
+            for websocket_client in self.websocket_clients:
+                if not websocket_client.running:
+                    try:
+                        self.active.remove(websocket_client.id)
+                        logger.info(f"Websocket thread {websocket_client.id} has finished.")
+                        logger.info(f"{len(self.active)} thread(s) remaining: ", *self.active)
+                    except Exception(ValueError) as e:
+                        logger.debug(e)
+                        pass
+
+    def websocket_thread_keepalive(self, interval=60) -> None:
         time.sleep(interval)
-        while websockets_open:
-            for j, websocket in enumerate(ws):
-                try:
-                    websocket.ping("keepalive")
-                    logging.info(f"Pinged websocket for {TICKERS[j]}.")
-                except WebSocketConnectionClosedException:
-                    pass
+        while self.websockets_open:
+            for i, websocket_client in enumerate(self.websocket_clients):
+                if websocket_client.running:
+                    try:
+                        websocket_client.ping("keepalive")
+                        logger.info(f"Pinged websocket for {websocket_client.market}.")
+                    except WebSocketConnectionClosedException:
+                        pass
             time.sleep(interval)
+        logger.info(f"No websockets open. Ending keepalive thread...")
 
-    def queue_worker():
-        """Get temporary dataframes from queue and append to final order match and candle dataframes."""
-        nonlocal data, candles, df_queue
-        delay_int = 5
-        logging.info(f"Queue worker starting in {delay_int} seconds...")
-        time.sleep(delay_int)
-        logging.info(f"Queue worker starting now. Starting queue size: {df_queue.qsize()} items")
+    @property
+    def short_str_markets(self) -> str:
+        # get market symbols and append into single string i.e. BTC,ETH,SOL
+        return ','.join([websocket.market[:websocket.market.find("-")] for websocket in self.websocket_clients])
 
-        save_timer = Timer()
+    @property
+    def websockets_open(self) -> bool:
+        if self.active:
+            return True
+        else:
+            return False
 
-        # only for saving in chunks, every k seconds
-        data_temp = data.copy()
-        candles_temp = candles.copy()
+    @property
+    def get_active(self) -> list:
+        return self.active
 
-        def process_dataframe(df):
-            # process_dataframe.counter += 1
-            nonlocal data, data_temp, candles, candles_temp
 
-            # concatenate to total dataframes and maybe save
-            try:
-                # logging.debug(f"df_type = {get_df_type(df)}")
+class WorkerDataFrame:
+    def __init__(self, df_type: str):
+        self.exchange = EXCHANGE
+        self.df = pd.DataFrame()
+        self.df_type = df_type
+        self.filename_args = None
+        self.filename = None
+        self.total_items = 0
 
-                # order matches
-                if get_df_type(df) in match_types:
-                    data = pd.concat([data, df], ignore_index=True)
-                    data_temp = pd.concat([data_temp, df], ignore_index=True)
+    def clear(self) -> None:  # return clear dataframe
+        self.df = self.df.iloc[0:0]
 
-                # candles
-                elif get_df_type(df) == "candle":
-                    candles = pd.concat([candles, df], ignore_index=True)
-                    candles_temp = pd.concat([candles_temp, df], ignore_index=True)
+    def append_tuple(self, data: tuple) -> None:  # append list
+        _, col = self.df.shape
+        if col == len(data):
+            self.df.loc[len(self.df)] = data
+        else:
+            raise ValueError(f"Length mismatch. There are {col} columns, but {len(data)} elements to append.")
+        self.total_items += 1
 
+    def concat(self, data: pd.DataFrame) -> None:  # append dataframe
+        self.df = pd.concat([self.df, data])
+        self.total_items += 1
+
+    def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename: bool = False) -> None:
+        """Save dataframe chunk using append."""
+
+        if self.is_empty:  # filename can't be derived if dataframe is empty
+            return
+
+        file_exists = os.path.exists(rf"data\{self.filename}.csv")
+
+        if not file_exists:  # Append with headers only if file doesn't exist yet
+            header = True
+            self.derive_df_filename()  # derive a filename if first save
+        else:
+            header = False
+
+        if update_filename and file_exists:  # rename when update_filename=True (should only trigger at end)
+            prev_filename = self.filename
+            self.derive_df_filename()
+            os.rename(prev_filename, self.filename)
+
+        if csv:
+            self.filename = self.filename + ".csv"
+            self.df.to_csv(rf"data\{self.filename}", index=False, mode='a', header=header)
+            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.csv.")
+
+        if hdf:
+            self.filename = self.filename + ".hdf"
+            self.df.to_hdf(rf"data\{self.filename}", key='df', mode='a')
+            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.hdf.")
+
+    def derive_df_filename(self) -> None:
+
+        def kwarg_it(__template: str) -> list:
+            __template = re.sub(r"{", "{kwargs['", re.sub(r"}", "']}", __template))
+            __list = re.split("_(?={)|(?<=})_", __template)
+            return __list
+
+        def __evaluate_filename_args(**kwargs) -> str:
+            """
+            Evaluate kwargs into a single filename string.
+            Kwargs must include a 'template' kwarg.
+            All elements within the f-string that must be evaluated should also be included within kwargs.
+            Template elements can only be evaluated two levels deep.
+            """
+
+            template = kwargs["template"]
+            eval_arg = []
+            for arg in kwarg_it(template):
+
+                try:
+                    (arg,) = eval(arg)
+                except NameError:
+                    pass
+                finally:
+                    eval_arg.append(str(arg))
+
+                if any(x in arg for x in {'{', '}'}):  # if brackets still exist, evaluate one level deeper
+                    eval_sub_arg = []
+                    for sub_arg in kwarg_it(arg):
+
+                        try:
+                            (sub_arg,) = eval(sub_arg)
+                        except NameError:
+                            pass
+                        finally:
+                            eval_sub_arg.append(str(sub_arg))
+
+                    arg = '_'.join(eval_sub_arg)
+                    eval_arg[-1] = arg
+
+            return '_'.join(eval_arg)
+
+        self.filename = __evaluate_filename_args(**self.filename_args)
+        logger.debug(f"filename derived: {self.filename}")
+
+    @property
+    def is_empty(self) -> bool:
+        if self.df.empty:
+            return True
+        else:
+            return False
+
+    @property
+    def rows(self):
+        return self.total_items
+
+
+class MatchDataFrame(WorkerDataFrame):
+    def __init__(self):
+        super(MatchDataFrame, self).__init__(df_type="matches")
+        self.columns = ("type", "time", "product_id", "side", "size", "price",)
+        self.df = pd.DataFrame(columns=self.columns)
+        self.filename = None
+
+    def process_item(self, item) -> None:
+        self.concat(item)  # Todo: add error checks/fixes in case item not same format as dataframe
+
+    def derive_df_filename(self) -> None:
+        try:
+            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
+            self.filename_args = {
+                "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
+                "exchange": self.exchange,
+                "filename_body": "{count}_order_matches",
+                "count": self.rows,
+                "all_symbols": short_str,
+                "timestamp": timestamp
+            }
+        except Exception as e:
+            logger.critical(e)
+            raise e
+        else:
+            super().derive_df_filename()
+
+
+class CandleDataFrame(WorkerDataFrame):
+    def __init__(self):
+        super(CandleDataFrame, self).__init__(df_type="candles")
+        self.columns = ("type", "candle", "product_id", "frequency", "open", "high", "low", "close", "volume")
+        self.df = pd.DataFrame(columns=self.columns)
+        self.freq = FREQUENCY
+
+        self.filename_body = "{count}_OHLC_{freq}_candles"
+        self.filename_body_args = {
+            "count": self.rows,
+            "freq": self.freq
+        }
+        # temp variables to help with building current candle
+        self.last_candle = None
+        self.last_open = None
+        self.last_high = None
+        self.last_low = None
+        self.last_close = None
+        self.last_volume = None
+
+    def process_item(self, item) -> None:
+        # logger.debug(f"CandleDataFrame processing item:\n{item.to_string()}")
+        __candle = item["time"].dt.floor(freq=FREQUENCY)[0]  # floor time at chosen frequency
+        __product_id = item["product_id"][0]
+        __size = item["size"][0]
+        __price = item["price"][0]
+
+        if __candle != self.last_candle:  # if new candle, append last candle and reset vars for current candle
+            __tuple = (
+                "candles", self.last_candle, __product_id, self.freq, self.last_open,
+                self.last_high, self.last_low, self.last_close, self.last_volume
+            )
+            self.append_tuple(__tuple)
+            self.last_open = __price
+            self.last_high = __price
+            self.last_low = __price
+            self.last_close = __price
+            self.last_volume = __price
+        else:  # if same candle, continue building it up
+            self.last_high = max(self.last_high, __price)
+            self.last_low = min(self.last_low, __price)
+            self.last_close = __price
+            self.last_volume += __size
+
+        self.last_candle = __candle
+
+    def derive_df_filename(self) -> None:
+        try:
+            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
+            self.filename_args = {
+                "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
+                "exchange": self.exchange,
+                "filename_body": "{count}_{freq}_OHLC_candles",
+                "count": self.rows,
+                "freq": self.freq,
+                "all_symbols": short_str,
+                "timestamp": timestamp
+            }
+        except Exception as e:
+            logger.critical(e)
+            raise e
+        else:
+            super().derive_df_filename()
+
+
+class QueueWorker:
+
+    def __init__(self, _queue: queue.Queue) -> None:
+        self.worker_dataframes = []
+        self.queue = _queue
+        self.delay = 2
+        self.timer = Timer()
+        self.save_timer = Timer()
+        self.save_interval = SAVE_INTERVAL  # seconds
+        self.queue_stats_timer = Timer()
+        self.queue_stats_interval = 30  # seconds
+        self.queue_stats = defaultdict(list)
+        self.finish_up = False
+        self.save_CSV = SAVE_CSV
+        self.save_HD5 = SAVE_HD5
+        self.store_df_in_mem = STORE_FEED_IN_MEMORY
+        self.channels = CHANNELS
+        self.build_candles = BUILD_CANDLES
+        self.thread = Thread(target=self.process_queue)
+        self.thread.start()
+
+        if self.save_CSV or self.save_HD5:
+            self.save = True
+        else:
+            self.save = False
+
+    def track_qsize(self, _print: bool = True) -> None:
+        self.queue_stats["time"].append(self.timer.elapsed())
+        self.queue_stats["queue_sizes"].append(self.queue.qsize())
+        avg_qsize = sum(self.queue_stats["queue_sizes"]) / len(self.queue_stats["queue_sizes"])
+        elapsed_time = min(self.timer.elapsed(), 1000*self.save_interval)
+        if _print:
+            logger.info(f"Average queue size over {self.timer.elapsed(hms_format=True)} seconds: {avg_qsize}")
+        self.queue_stats["avg_qsize"].append(avg_qsize)
+        # keep track of the last 1000 queue sizes (so 10k seconds)
+        self.queue_stats["queue_sizes"] = self.queue_stats["queue_sizes"][-1000:]
+        self.queue_stats["avg_qsize"] = self.queue_stats["avg_qsize"][-1000:]
+
+    def initialize_dataframes(self) -> None:
+        worker_data_frame_dict = {
+            "matches": MatchDataFrame,
+            "candles": CandleDataFrame
+        }
+        for _channel in self.channels:
+            wdf = worker_data_frame_dict[_channel]()
+            self.worker_dataframes.append(wdf)
+
+        if self.build_candles:
+            wdf = worker_data_frame_dict["candles"]()
+            self.worker_dataframes.append(wdf)
+
+    def save_dataframes(self, final: bool = False) -> None:
+        os.makedirs('data', exist_ok=True)  # ensure 'data' output folder exists
+        for wdf in self.worker_dataframes:
+            if not wdf.is_empty:
+                if not final:
+                    wdf.save_chunk()
                 else:
-                    logging.debug(f"Raising UnknownDataframeTypeError")
-                    raise UnknownDataframeTypeError
+                    wdf.save_chunk(update_filename=True)
+            if not self.store_df_in_mem:
+                wdf.clear()
 
-            except UnknownDataframeTypeError:
-                logging.critical("Unknown exception. Dataframe processing failed.")
-                pass
+    def process_queue(self) -> None:
+        self.timer.start()
+        self.save_timer.start()
+        self.queue_stats_timer.start()
+        logger.info(f"Queue worker starting in {self.delay} seconds...")
+        time.sleep(self.delay)
+        logger.info(f"Queue worker starting now. Starting queue size: {self.queue.qsize()} items")
 
-        def save_temp_dataframes(final: bool = False):
-            """Saves temporary dataframes to filesystem and clears their contents.
-            If final=True, rename files to include dataframe element count"""
-            nonlocal data_temp, candles_temp, match_df_filename, candle_df_filename
+        self.initialize_dataframes()
+        self.track_qsize()
 
-            if match_df_filename is None and not data_temp.empty:
-                match_df_filename = derive_df_filename(data_temp)
-                if final:
-                    prev_match_df_filename = match_df_filename
-                    match_df_filename = derive_df_filename(data, final=True)
-                    if os.path.exists(prev_match_df_filename):
-                        os.rename(prev_match_df_filename, match_df_filename)
-
-            if candle_df_filename is None and not candles_temp.empty:
-                candle_df_filename = derive_df_filename(candles_temp)
-                if final:
-                    prev_candle_df_filename = candle_df_filename
-                    candle_df_filename = derive_df_filename(candles, final=True)
-                    if os.path.exists(prev_candle_df_filename):
-                        os.rename(prev_candle_df_filename, candle_df_filename)
-
-            if not data_temp.empty:
-                save_dataframe(data_temp, match_df_filename)
-                logging.debug("Match data saved.")
-                logging.info(f"Final match file saved to /data:\n----{match_df_filename}.csv")
-
-            if not candles_temp.empty:
-                save_dataframe(candles_temp, candle_df_filename)
-                logging.debug("Candle data saved.")
-                logging.info(f"Final candle file saved to /data:\n----{candle_df_filename}.csv")
-
-            # clear temp dataframes
-            data_temp = data_temp.iloc[0:0]
-            candles_temp = candles_temp.iloc[0:0]
-
-        # process_dataframe.counter = 0
-
-        queue_timer = Timer()
-        queue_timer_limit = 10
-        queue_sizes = []
-        queue_timer.start()
-
-        save_timer.start()
-
-        match_df_filename = None
-        candle_df_filename = None
-
-        # get item -> process & save -> done
         while True:
-
-            queue_sizes.insert(0, df_queue.qsize())
-            queue_sizes = queue_sizes[:1000]  # limit to last 1000 queue sizes measured
-
             try:
-                item = df_queue.get(timeout=0.01)
-                # logging.debug(f"item =\n{item}")
+                item = self.queue.get(timeout=0.01)
+                # logger.debug(f"item =\n{item}")
 
                 if item is None:
-                    logging.debug(f"item is None: {item is None}")
                     continue
 
                 try:
-                    process_dataframe(item)
-                    # logging.debug(f"Item processed. Queue size: {df_queue.qsize()} items")
+                    self.process_item(item)
+                    # logger.debug(f"Item processed. Queue size: {data_queue.qsize()} items")
 
                 finally:
-                    df_queue.task_done()
+                    self.queue.task_done()
 
-                if (SAVE_CSV or SAVE_HD5) and save_timer.check() >= k:
-                    save_timer.reset()
-                    save_temp_dataframes()
+                if self.save and self.save_timer.elapsed() > self.save_interval:
+                    self.save_dataframes()
+                    self.save_timer.reset()
+
+                if self.queue_stats_timer.elapsed() > self.queue_stats_interval:
+                    self.track_qsize(_print=True)
+                    self.queue_stats_timer.reset()
 
             except queue.Empty:
-                # logging.debug("Queue is Empty.")
+                # logger.debug(f"Queue is Empty. Sleeping for {self.delay} seconds...")
+                # time.sleep(self.delay)
                 pass
 
-            # Todo: make queue_sizes a numpy array and figure out how to work with fixed array size limitation
-            if queue_timer.check() >= queue_timer_limit:
-                avg_queue_size = sum(queue_sizes) / len(queue_sizes)
-                logging.info(f"Average queue size: {avg_queue_size}")
-                queue_timer.reset()
+            if self.finish_up:
+                logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
 
-            if not websockets_open and (len(data_temp) != 0 or len(candles_temp) != 0):
-                save_temp_dataframes(final=True)
+            if (self.save_CSV or self.save_HD5) and self.finish_up and queue.Empty:  # Perform final dataframe saves
+                self.save_dataframes(final=True)
                 break
 
-    def get_df_type(df):
-        """Assumes cells are populated and first column is type"""
-        return df.iloc[0][0]
+        logger.info("Queue worker has finished.")
 
-    def derive_df_filename(df, final=False):
+    def process_item(self, item: list) -> None:
+        for wdf in self.worker_dataframes:
+            wdf.process_item(item)
 
-        body_dict = {"match": "{df_size}_order_matches",
-                     "last_match": "{df_size}_order_matches",
-                     "candle": "{FREQUENCY}_OHLC_{df_size}_candles"}
+    def finish(self) -> None:
+        self.finish_up = True
 
-        def fstr(template):
-            """Evaluate string as an f-string."""
-            nonlocal df_size
-            global FREQUENCY
-            return eval(f"f'{template}'")
 
-        try:
-            df_type = get_df_type(df)
-        except IndexError:
-            df_type = "null"
+def main():
 
-        body = body_dict[df_type]
-
-        df_size = 'X'
-        if final: # Todo: add logic for inserting dataframe length into filename at end
-            df_size = len(df)
-
-        filename = f"Coinbase_{fstr(body)}_{all_symbols}_USD_{timestamp}_CHUNKED"
-
-        return filename
-
-    def save_dataframe_full(df: pd.DataFrame, filename: str):
-        """Save dataframe in full"""
-        # global SAVE_CSV, SAVE_HD5
-        if SAVE_CSV:
-            df.to_csv(rf"data\{filename}.csv", index=False)
-        if SAVE_HD5:
-            df.to_hdf(rf"data\{filename}.csv", index=False)
-
-    def save_dataframe(df: pd.DataFrame, filename: str):
-        """Save dataframe chunk using append"""
-        os.makedirs('data', exist_ok=True)
-        if not os.path.exists(rf"data\{filename}.csv"):
-            header = True
-        else:
-            header = False
-        df.to_csv(rf"data\{filename}.csv", index=False, mode='a', header=True)
-        logging.info(f"Saved df into {filename}.")
+    data_queue = queue.Queue()
 
     # on Coinbase, enables authenticated match channel subscription
     user = api_coinbase.get_user()
 
     # handle websocket threads
-    for i, ticker in enumerate(TICKERS):
-        logging.info(f"Starting websocket Thread {i} for {ticker}.")
-        thread = Thread(target=websocket_thread, args=(ws, ticker, i, data_col, candle_col))
-        active_threads.append(thread)
-        thread.start()
+    ws_handler = WebsocketClientHandler()
+    for i, (market, channel) in enumerate(itertools.product(MARKETS, CHANNELS)):
+        ws_handler.add(WebsocketClient(channel=channel, market=market, data_queue=data_queue))
 
-    # define keepalive thread
-    thread_keepalive = Thread(target=websocket_thread_keepalive, daemon=True)
+    queue_worker = QueueWorker(data_queue)
 
-    worker = Thread(target=queue_worker)
-    worker.start()
-
-    # keep main() from ending before threads are shut down
-    while True:
+    # keep main() from ending before threads are shut down, unless queue worker broke
+    while not killer.kill_now:
         time.sleep(1)
-        for thread in active_threads:
-            if not thread.is_alive():
-                # thread.join()
-                active_threads.remove(thread)
-                logging.info(f"Active threads = {len(active_threads)}")
-        if not active_threads:
-            websockets_open = False
-            break
+        if not queue_worker.thread.is_alive():
+            killer.kill_now = True
 
-    worker.join()
+    ws_handler.kill_all()
 
-    with pd.option_context('display.max_rows', 30, 'display.max_columns', 20, 'display.width', 1000):
-        print(f"\n\nMatch data preview:\n{data}\n\n")
-        print(f"Candle data preview:\n{candles}\n\n")
+    queue_worker.finish()
 
-    # handle output filenames and save if options are selected and dataframes are not empty
-    order_count = len(data)
-    candle_count = len(candles)
-    file_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    data_filename = f"Coinbase_{order_count}_order_matches_{all_symbols}_USD_{file_timestamp}."
-    candle_filename = f"Coinbase_{FREQUENCY}_OHLC_{candle_count}_candles_{all_symbols}_USD_{file_timestamp}"
+    if queue_worker.thread.is_alive():
+        queue_worker.thread.join()
 
-    if order_count != 0:
-        save_dataframe_full(data, data_filename)
-    if candle_count != 0:
-        save_dataframe_full(candles, candle_filename)
+    logger.info(f"Remaining queue size: {data_queue.qsize()}")
+    if data_queue.qsize() != 0:
+        logger.warning("Queue worker did not finish processing the queue! Clearing it now...")
+        data_queue.queue.clear()
+        logger.info(f"Queue cleared.")
 
 
 if __name__ == '__main__':
@@ -453,4 +635,4 @@ if __name__ == '__main__':
     module_timer.start()
     killer = GracefulKiller()
     main()
-    module_timer.stop()
+    module_timer.elapsed(display=True)
