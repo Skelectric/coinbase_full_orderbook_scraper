@@ -26,9 +26,11 @@ pd.options.display.float_format = '{:.6f}'.format
 # ======================================================================================
 # Webhook Parameters
 
+VIEW_ONLY = False
+
 EXCHANGE = "Coinbase"
 ENDPOINT = 'wss://ws-feed.exchange.coinbase.com'
-MARKETS = ('BTC-USD', 'ETH-USD', 'SNX-USD', 'CRV-USD')
+MARKETS = ('BTC-USD',)
 CHANNELS = ('matches', )
 # MARKETS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
 #           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
@@ -54,7 +56,7 @@ logger.add(
 # add console logger with formatting
 logger.add(
     sys.stdout, enqueue=True, level="DEBUG",
-    format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS} --- {level} | Thread {thread}</white> <level>{message}</level>"
+    format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> --- <level>{level}</level> | Thread {thread} <level>{message}</level>"
 )
 
 # ======================================================================================
@@ -94,7 +96,7 @@ class WebsocketClient:
         self.thread_id = None
         self.running = None
         self.kill = False
-        self.relevant_msg_fields = ("type", "time", "product_id", "side", "size", "price",)
+        self.relevant_match_fields = ("type", "time", "trade_id", "product_id", "side", "size", "price",)
 
     def websocket_thread(self) -> None:
         self.ws = create_connection(self.ws_url)
@@ -127,8 +129,11 @@ class WebsocketClient:
                 logger.debug(f"{e} - data: {feed}")
                 break
             else:
-                item = self.parse_msg(msg)
-                self.data_queue.put(item)
+                if msg != {}:
+                    item = self.parse_msg(msg)
+                    self.data_queue.put(item)
+                else:
+                    logger.warning("Webhook message is empty!")
 
         # close websocket
         try:
@@ -141,19 +146,19 @@ class WebsocketClient:
         self.running = False
 
     def parse_msg(self, msg: dict) -> pd.DataFrame:
-        _msg = {key: value for key, value in msg.items() if key in self.relevant_msg_fields}
-        if "time" in _msg:
-            _msg["time"] = datetime.strptime(msg.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
 
-        if "type" in _msg and _msg["type"] in {"last_match", "match"}:
+        if "type" in msg and msg["type"] in {"last_match", "match"}:
+            _msg = {key: value for key, value in msg.items() if key in self.relevant_match_fields}
+            _msg["time"] = datetime.strptime(_msg.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
             self.display_match(_msg)
-            item = pd.DataFrame(columns=self.relevant_msg_fields, data=[_msg])
+            item = pd.DataFrame(columns=self.relevant_match_fields, data=[_msg])
             return item
 
-        elif "type" in _msg and _msg["type"] == "subscriptions":
-            line_output = f"Subscribed to '{_msg['channels'][0]['name']}' channel "
-            line_output += f"for {_msg['channels'][0]['product_ids'][0]}"
-            s_print(line_output)
+        elif "type" in msg and msg["type"] == "subscriptions":
+
+            line_output = f"Subscribed to {EXCHANGE}'s '{msg['channels'][0]['name']}' channel "
+            line_output += f"for {msg['channels'][0]['product_ids'][0]}"
+            s_print(colored(line_output, "yellow"))
 
         else:
             s_print(msg)
@@ -209,7 +214,7 @@ class WebsocketClient:
 class WebsocketClientHandler:
     def __init__(self) -> None:
         self.websocket_clients = []
-        self.active = []
+        # self.active = []
         self.websocket_keepalive = Thread(target=self.websocket_thread_keepalive, daemon=True)
         self.kill_signal_sent = False
 
@@ -218,12 +223,9 @@ class WebsocketClientHandler:
         if start_immediately:
             self.start(websocket_client)
 
-    def remove(self, websocket_client: WebsocketClient) -> None:
-        self.websocket_clients.remove(websocket_client)
-
     def start(self, websocket_client) -> None:
         websocket_client.start_thread()
-        self.active.append(websocket_client.id)
+        # self.active.append(websocket_client.id)
         if not self.websocket_keepalive.is_alive():  # start keepalive thread
             self.websocket_keepalive.start()
 
@@ -244,33 +246,27 @@ class WebsocketClientHandler:
         self.check_finished()
 
     def check_finished(self) -> None:
-        while len(self.active) != 0:
-            logger.debug(f"Active websockets: {self.active}")
-            for websocket_client in self.websocket_clients:
-                if not websocket_client.running:
-                    logger.debug(f"{websocket_client.id} has stopped running.")
-                    try:
-                        logger.debug(f"Removing {websocket_client.id} from actives.")
-                        self.active.remove(websocket_client.id)
-                        logger.info(f"{len(self.active)} thread(s) remaining.")
-                    except Exception as e:
-                        logger.debug(e)
-                        pass
+        while len(self.get_active) != 0:
+            i = 0
+            while i < len(self.websocket_clients):
+                if not self.websocket_clients[i].running:
+                    logger.debug(f"{self.websocket_clients[i].id} has stopped running.")
+                    self.websocket_clients.remove(self.websocket_clients[i])
+                    logger.info(f"{len(self.get_active)} thread(s) remaining.")
                 else:
-                    logger.debug(f"{websocket_client.id} is still running.")
+                    logger.info(f"{self.websocket_clients[i].id} is still running.")
+                    i += 1
 
-            for websocket_client in self.websocket_clients:
-                if websocket_client.id not in self.active:
-                    self.websocket_clients.remove(websocket_client)
-
-            logger.info(f"Checking again in 10 seconds.")
-            time.sleep(10)
+            if len(self.get_active) != 0:
+                logger.info(f"Checking again in 10 seconds.")
+                time.sleep(10)
 
     def websocket_thread_keepalive(self, interval=60) -> None:
         time.sleep(interval)
         while self.websockets_open:
-            logger.debug(f"Active websockets: {self.active}")
-            for i, websocket_client in enumerate(self.websocket_clients):
+            logger.debug(f"Active websockets: {self.get_active}")
+            # for i, websocket_client in enumerate(self.websocket_clients):
+            for websocket_client in self.websocket_clients:
                 if websocket_client.running:
                     try:
                         websocket_client.ping("keepalive")
@@ -287,14 +283,14 @@ class WebsocketClientHandler:
 
     @property
     def websockets_open(self) -> bool:
-        if self.active:
+        if self.websocket_clients:
             return True
         else:
             return False
 
     @property
     def get_active(self) -> list:
-        return self.active
+        return [x.id for x in self.websocket_clients]
 
 
 class WorkerDataFrame:
@@ -659,26 +655,28 @@ def main():
     for i, (market, channel) in enumerate(itertools.product(MARKETS, CHANNELS)):
         ws_handler.add(WebsocketClient(channel=channel, market=market, data_queue=data_queue))
 
-    queue_worker = QueueWorker(data_queue)
+    if not VIEW_ONLY:
+        queue_worker = QueueWorker(data_queue)
 
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
         time.sleep(1)
-        if not queue_worker.thread.is_alive():
+        if not VIEW_ONLY and not queue_worker.thread.is_alive():
             killer.kill_now = True
 
     ws_handler.kill_all()
 
-    queue_worker.finish()
+    if not VIEW_ONLY:
+        queue_worker.finish()
 
-    if queue_worker.thread.is_alive():
-        queue_worker.thread.join()
+        if queue_worker.thread.is_alive():
+            queue_worker.thread.join()
 
-    logger.info(f"Remaining queue size: {data_queue.qsize()}")
-    if data_queue.qsize() != 0:
-        logger.warning("Queue worker did not finish processing the queue! Clearing it now...")
-        data_queue.queue.clear()
-        logger.info(f"Queue cleared.")
+        logger.info(f"Remaining queue size: {data_queue.qsize()}")
+        if data_queue.qsize() != 0:
+            logger.warning("Queue worker did not finish processing the queue! Clearing it now...")
+            data_queue.queue.clear()
+            logger.info(f"Queue cleared.")
 
 
 if __name__ == '__main__':
