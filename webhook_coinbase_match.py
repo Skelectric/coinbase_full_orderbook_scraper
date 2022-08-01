@@ -7,7 +7,7 @@ import threading
 from datetime import datetime
 from threading import Thread, Lock
 from websocket import create_connection, WebSocketConnectionClosedException
-import api_coinbase
+from api_coinbase import CoinbaseAPI
 import signal
 import time
 import json
@@ -84,14 +84,14 @@ class GracefulKiller:
 
 
 class WebsocketClient:
-    def __init__(self, channel: str, market: str, data_queue: queue.Queue) -> None:
+    def __init__(self, api: CoinbaseAPI, channel: str, market: str, data_queue: queue.Queue) -> None:
         self.channel = channel
         self.market = market
         self.data_queue = data_queue
         self.id = self.channel + '_' + self.market
         self.ws = None
         self.ws_url = ENDPOINT
-        self.user = api_coinbase.get_user()
+        self.user = api.get_user
         self.thread = None
         self.thread_id = None
         self.running = None
@@ -648,12 +648,12 @@ def main():
     data_queue = queue.Queue()
 
     # on Coinbase, enables authenticated match channel subscription
-    user = api_coinbase.get_user()
+    api = CoinbaseAPI()
 
     # handle websocket threads
     ws_handler = WebsocketClientHandler()
     for i, (market, channel) in enumerate(itertools.product(MARKETS, CHANNELS)):
-        ws_handler.add(WebsocketClient(channel=channel, market=market, data_queue=data_queue))
+        ws_handler.add(WebsocketClient(api=api, channel=channel, market=market, data_queue=data_queue))
 
     if not VIEW_ONLY:
         queue_worker = QueueWorker(data_queue)
