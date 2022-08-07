@@ -1,5 +1,6 @@
 """Build orderbook using webhook to Coinbase's FULL channel."""
 from loguru import logger
+logger.remove()  # remove default logger
 from termcolor import colored
 import threading
 from datetime import datetime
@@ -30,30 +31,27 @@ pd.options.display.float_format = '{:.6f}'.format
 # ======================================================================================
 # Script Parameters
 
-WEBHOOK_ONLY = True
+WEBHOOK_ONLY = False
 
-DUMP_FEED_INTO_JSON = True
+DUMP_FEED_INTO_JSON = False
 LOAD_FEED_FROM_JSON = False  # If true, no webhook
 
 PLOT_DEPTH_CHART = True
 
-JSON_FILEPATH = "data/full_SNX-USD_dump_20220802-134751.json"  # for simulating feed
+JSON_FILEPATH = "data/full_SNX-USD_dump_20220807-021730.json"  # for simulating feed
 
 # ======================================================================================
 # Webhook Parameters
 
 EXCHANGE = "Coinbase"
 ENDPOINT = 'wss://ws-feed.exchange.coinbase.com'
-MARKETS = ('SNX-USD',)
+MARKETS = ('ETH-USD',)
 CHANNELS = ('full',)
 # MARKETS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
 #           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
 
 # ======================================================================================
 # Configure logger
-
-# remove default loguru logger
-logger.remove()
 
 # # add file logger with full debug
 # logger.add(
@@ -62,7 +60,7 @@ logger.remove()
 
 # add console logger with formatting
 logger.add(
-    sys.stdout, enqueue=True, level="DEBUG",
+    sys.stdout, level="DEBUG",
     format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> --- <level>{level}</level> | Thread {thread} <level>{message}</level>"
 )
 
@@ -75,12 +73,6 @@ def s_print(*args, **kwargs):
     """Thread-safe print function with colors."""
     with s_lock:
         print(*args, **kwargs)
-
-
-def s_(func):
-    """Thread-safe function wrapper."""
-    with s_lock:
-        func
 
 
 class WebsocketClient:
@@ -121,7 +113,7 @@ class WebsocketClient:
         self.running = True
 
         feed = None
-        while not self.kill:
+        while not self.kill and threading.main_thread().is_alive():
             try:
                 feed = self.ws.recv()
                 if feed:
@@ -247,8 +239,8 @@ class WebsocketClientHandler:
                     i += 1
 
             if len(self.get_active) != 0:
-                logger.info(f"Checking again in 10 seconds.")
-                time.sleep(10)
+                logger.info(f"Checking again in 2 seconds.")
+                time.sleep(2)
 
     def websocket_thread_keepalive(self, interval=60) -> None:
         time.sleep(interval)
@@ -289,7 +281,8 @@ class QueueWorker:
         self.last_sequence = 0
 
         self.queue = _queue
-        self.delay = 2  # seconds
+        self.msg_display_delay = 5  # seconds
+        self.rest_delay = 0.1  # seconds
 
         self.output_queue = output_queue
         self.output_item_counter = 0
@@ -302,19 +295,26 @@ class QueueWorker:
 
         self.finish_up = False  # end flag
 
-        if LOAD_FEED_FROM_JSON:
-            self.fill_queue_from_json()
-
         self.thread = Thread(target=self.process_queue)
-        self.thread.start()
+        # self.thread.start()
+
+        if LOAD_FEED_FROM_JSON:
+            self.JSON_data = None
+            self.load_json()
+
+    def load_json(self):
+        assert LOAD_FEED_FROM_JSON
+        logger.debug(f"LOAD_FEED_FROM_JSON set to True. Loading JSON file into queue worker's JSON_data.")
+        with open(JSON_FILEPATH, 'r') as f:
+            self.JSON_data = iter(json.load(f))
 
     def fill_queue_from_json(self):
         """Use when LOAD_FEED_FROM_JSON is True to build a queue from JSON file."""
-        assert LOAD_FEED_FROM_JSON
-        with open(JSON_FILEPATH, 'r') as f:
-            data = json.load(f)
-            for item in data:
-                self.queue.put(item)
+        assert hasattr(self, 'JSON_data')
+        item = next(self.JSON_data, None)
+        if item is not None:
+            # logger.debug("Placing item from JSON_data into queue.")
+            self.queue.put(item)
 
     def track_qsize(self, _print: bool = True) -> None:
         self.queue_stats["time"].append(self.timer.elapsed())
@@ -341,6 +341,11 @@ class QueueWorker:
         # self.track_qsize()
 
         while True:
+
+            # simulate queue
+            if LOAD_FEED_FROM_JSON:
+                self.fill_queue_from_json()
+
             try:
                 item = self.queue.get(timeout=0.01)
                 # logger.debug(f"item =\n{item}")
@@ -364,8 +369,6 @@ class QueueWorker:
                     self.queue_stats_timer.reset()
 
             except queue.Empty:
-                logger.debug(f"Queue is Empty. Sleeping for {self.delay} seconds...")
-                time.sleep(self.delay)
                 pass
 
             # check on main thread -> wrap it up if main thread broke
@@ -480,18 +483,18 @@ class QueueWorker:
                 raise ValueError("Unhandled msg type")
 
     def display_orderbook_info(self):
-        s_print("\n_________orderbook_________")
+        logger.info("_________orderbook_________")
         levels = self.lob.levels
-        s_print(f"levels = {levels}")
+        logger.info(f"levels = {levels}")
 
         orders = self.lob.orders
-        s_print(f"orders = {orders}")
+        logger.info(f"orders = {orders}")
 
-        s_print(f"levels bid count = {len(levels[0])}")
-        s_print(f"levels ask count = {len(levels[1])}")
+        logger.info(f"levels bid count = {len(levels[0])}")
+        logger.info(f"levels ask count = {len(levels[1])}")
 
         top_level = self.lob.top_level
-        s_print(f"top level = {top_level}")
+        logger.info(f"top level = {top_level}")
 
         self.lob.display_bid_tree()
         self.lob.display_ask_tree()
@@ -534,10 +537,17 @@ class DepthChartPlotter:
         # self.fig, self.ax = plt.subplots(sharex=True, sharey=True)
         self.fig = plt.figure(figsize=(9, 6))
         self.ax = self.fig.add_subplot()
+
+        self.display_lim = 0.025  # display % below best bid and % above best ask
+
+        self.outlier_pct = 0.01  # remove outliers % below best bid and % above best ask
+
         self.timestamp = None
-        logger.debug("DepthChartPlotter initialized.")
         self.item_num = None
-        self.skip_item_freq = 5
+
+        self.skip_item_freq = 10
+
+        logger.debug("DepthChartPlotter initialized.")
 
     def plot(self):
         # logger.debug(f"Plotting data #{self.item_num}")
@@ -550,63 +560,125 @@ class DepthChartPlotter:
             self.ax.set_xlabel('Price')
             self.ax.set_ylabel('Quantity')
 
+            best_bid, best_ask, worst_bid, worst_ask = None, None, None, None
+            max_bid_depth, max_ask_depth = None, None
+            x_min, x_max, y_max = None, None, None
+
             if bid_prices is not None:
-                self.ax.step(bid_prices, bid_depth, color="green")
+                best_bid = bid_prices[-1]
+                worst_bid = bid_prices[0]
+                x_min = max(best_bid * (1 - self.display_lim), worst_bid)
+                self.ax.step(bid_prices, bid_depth, color="green", label="bids")
                 plt.fill_between(bid_prices, bid_depth, facecolor="green", step='pre', alpha=0.2)
+                max_bid_depth = max(bid_depth)
 
             if ask_prices is not None:
-                self.ax.step(ask_prices, ask_depth, color="red")
+                best_ask = ask_prices[0]
+                worst_ask = ask_prices[-1]
+                x_max = min(best_ask * (1 + self.display_lim), worst_ask)
+                self.ax.step(ask_prices, ask_depth, color="red", label="asks")
                 plt.fill_between(ask_prices, ask_depth, facecolor="red", step='pre', alpha=0.2)
+                max_ask_depth = max(ask_depth)
 
+            self.ax.set_xlim(left=x_min, right=x_max)
             self.ax.spines['bottom'].set_position('zero')
 
-            self.fig.suptitle(f"Market Depth")
-            self.ax.set_title(f"{self.timestamp} - queue size: {self.queue.qsize()}")
+            # vars that require both bids and asks not to be None
+            if best_bid is None or best_ask is None:
+                bid_ask_spread_txt = f"bid-ask LOADING..."
+                max_bid_ask_depth_txt = f"max bid depth LOADING... max ask depth LOADING..."
+                worst_bid_ask_txt = f"lowest bid LOADING... highest ask LOADING..."
+                orders_displayed_txt = f"bid level count LOADING ask level count LOADING"
+            else:
+                bid_ask_spread = best_ask - best_bid
+                bid_ask_spread_txt = f"bid-ask {best_bid:.3f}, {best_ask:.3f}, {bid_ask_spread:.3f}"
+                max_bid_ask_depth_txt = f"max bid depth {max_bid_depth:.2f} max ask depth {max_ask_depth:.2f}"
+                worst_bid_ask_txt = f"worst bid {worst_bid:.3f}... worst ask {worst_ask:.3f}."
+
+                y_max = max(max_bid_depth, max_ask_depth) * 1.1
+
+            self.ax.set_ylim(top=y_max)
+
+            self.fig.suptitle(f"Market Depth - Coinbase - {MARKETS[0]}")
+            self.ax.set_title(f"latest timestamp: {self.timestamp}")
+            self.ax.legend(loc='upper right')
+
+            self.ax.text(
+                0.005, 0.98, bid_ask_spread_txt,
+                horizontalalignment='left', verticalalignment='center', size='smaller',
+                transform=self.ax.transAxes
+            )
+
+            self.ax.text(
+                0.005, 0.95, max_bid_ask_depth_txt,
+                horizontalalignment='left', verticalalignment='center', size='smaller',
+                transform=self.ax.transAxes
+            )
+
+            self.ax.text(
+                0.005, 0.92, worst_bid_ask_txt,
+                horizontalalignment='left', verticalalignment='center', size='smaller',
+                transform=self.ax.transAxes
+            )
+
+            self.ax.text(
+                0.005, 0.89, f"{self.queue.qsize()} events to draw",
+                horizontalalignment='left', verticalalignment='center', size='smaller',
+                transform=self.ax.transAxes
+            )
 
             self.fig.canvas.flush_events()  # Todo: read more about what this does
             self.fig.canvas.draw()
 
         else:
             # logger.debug(f"Plotting queue is empty. Sleeping for 2 second.")
-            plt.pause(2)
+            # plt.pause(0.1)
             pass
 
     def get_data(self):
 
-        if self.queue.qsize() > self.skip_item_freq:
-            for i in range(self.skip_item_freq):
-                _ = self.queue.get()
+        # start discarding items when qsize too large # Todo see if queue maxsize can replace this
+        while self.queue.qsize() > self.skip_item_freq:
+            _ = self.queue.get()
 
         self.item_num, self.timestamp, bid_levels, ask_levels = self.queue.get()
         self.queue.task_done()
         # logger.debug(f"RETRIEVING item {self.item_num}: bid_levels : {bid_levels}")
         # logger.debug(f"RETRIEVING item {self.item_num}: ask_levels : {ask_levels}")
-        return self.transform_data(bid_levels, ask_levels)
+        return self.transform_data(bid_levels, ask_levels, self.outlier_pct)
 
     @staticmethod
-    def transform_data(bid_levels, ask_levels) -> tuple:
+    def transform_data(bid_levels, ask_levels, outlier_pct) -> tuple:
         bid_prices, bid_depth, ask_prices, ask_depth = None, None, None, None
 
         if bid_levels != {}:
             # get bid_levels and ask_levels, place into numpy arrays, and sort
             bids = np.fromiter(bid_levels.items(), dtype="f,f")
             bids.sort()
-            # split into prices and sizes (reverse order for bids only)
-            bid_prices = np.vectorize(lambda x: x[0])(bids[::-1])
-            bid_sizes = np.vectorize(lambda x: x[1])(bids[::-1])
-            # calculate order depth
-            bid_depth = np.cumsum(bid_sizes)
-            # for bids only, zip, sort and split to reverse order again
-            bid_depth_zip = np.fromiter(zip(bid_prices, bid_depth), dtype='f,f')
-            bid_depth_zip.sort()
-            bid_prices = np.vectorize(lambda x: x[0])(bid_depth_zip)
-            bid_depth = np.vectorize(lambda x: x[1])(bid_depth_zip)
+            # remove bottom % of bids
+            remove_bids = len(bids) - int(len(bids) * (1 - outlier_pct))
+            bids = bids[remove_bids:]
+            if len(bids) != 0:
+                # split into prices and sizes (reverse order for bids only)
+                bid_prices = np.vectorize(lambda x: x[0])(bids[::-1])
+                bid_sizes = np.vectorize(lambda x: x[1])(bids[::-1])
+                # calculate order depth
+                bid_depth = np.cumsum(bid_sizes)
+                # for bids only, zip, sort and split to reverse order again
+                bid_depth_zip = np.fromiter(zip(bid_prices, bid_depth), dtype='f,f')
+                bid_depth_zip.sort()
+                bid_prices = np.vectorize(lambda x: x[0])(bid_depth_zip)
+                bid_depth = np.vectorize(lambda x: x[1])(bid_depth_zip)
+
         if ask_levels != {}:  # repeat for asks
             asks = np.fromiter(ask_levels.items(), dtype="f,f")
             asks.sort()
-            ask_prices = np.vectorize(lambda x: x[0])(asks)
-            ask_sizes = np.vectorize(lambda x: x[1])(asks)
-            ask_depth = np.cumsum(ask_sizes)
+            remove_asks = int(len(asks) * (1 - outlier_pct))
+            asks = asks[:remove_asks]
+            if len(asks) != 0:
+                ask_prices = np.vectorize(lambda x: x[0])(asks)
+                ask_sizes = np.vectorize(lambda x: x[1])(asks)
+                ask_depth = np.cumsum(ask_sizes)
 
         return bid_prices, bid_depth, ask_prices, ask_depth
 
@@ -632,6 +704,7 @@ def main():
             queue_worker = QueueWorker(data_queue, plotter.queue)
         else:
             queue_worker = QueueWorker(data_queue)
+        queue_worker.thread.start()
 
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
@@ -657,14 +730,16 @@ def main():
         if queue_worker.thread.is_alive():
             queue_worker.thread.join()
 
+        if PLOT_DEPTH_CHART:
+            logger.info(f"Remaining plotter queue size: {plotter.queue.qsize()}")
+            plotter.queue.queue.clear()
+
+
         logger.info(f"Remaining data queue size: {data_queue.qsize()}")
-        # logger.info(f"Remaining plotter queue size: {plotter.queue.qsize()}")
         if data_queue.qsize() != 0:
             logger.warning("Queue worker did not finish processing the queue! Clearing all queues now...")
             data_queue.queue.clear()
-            plotter.queue.queue.clear()
             logger.info(f"Remaining data queue size: {data_queue.qsize()}")
-            # logger.info(f"Remaining plotter queue size: {plotter.queue.qsize()}")
             logger.info(f"Queues cleared.")
 
 

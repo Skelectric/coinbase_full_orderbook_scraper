@@ -5,6 +5,19 @@ from itertools import islice
 import trace
 from collections import deque
 import copy
+from loguru import logger
+logger.remove()
+
+# ======================================================================================
+# Configure logger
+
+# add file logger with full debug
+# logger.add(
+#     "logs\\orderbook_{time}.log", level="DEBUG", filter="orderbook",
+#     format="<level>{level}</level> -- <level>{message}</level>"
+# )
+
+# ======================================================================================
 
 
 class LimitOrderBook:
@@ -80,11 +93,11 @@ class LimitOrderBook:
         try:
             popped_order = self.orders.pop(order.uid)
         except KeyError:
-            print("Closed order id was not found in orders dict.")
+            # logger.info("Closed order id was not found in orders dict.")
             return None
 
         # Remove order from its doubly linked list
-        print(f"\nDEBUG: Removing order from DLL: {popped_order}")
+        # logger.debug(f"Removing order from DLL: {popped_order}")
         popped_order.pop_from_list()
 
         # reduce size of price level
@@ -99,7 +112,7 @@ class LimitOrderBook:
 
         # Remove price level from set and update best bid or best ask
         if order_list.count == 0:
-            # print(f"DEBUG: root order list has 0 orders remaining.")
+            # logger.debug(f"Root order list has 0 orders remaining.")
 
             if popped_order.is_bid:
                 self.__bid_levels.pop(popped_order.price)
@@ -109,7 +122,7 @@ class LimitOrderBook:
             assert isinstance(limit_level, LimitLevel)
             limit_level.remove()
 
-            # print(f"\nDEBUG: Removed node from tree.")
+            # logger.debug(f"Removed node from tree.")
 
         return popped_order
 
@@ -167,17 +180,19 @@ class LimitOrderBook:
 
     def display_bid_tree(self):
         lines, *_ = _display_aux(self.bids)
-        print(f"\nBids AVL Tree (size: {len(self.bids)})")
+        # logger.info("")
+        # logger.info(f"Bids AVL Tree (size: {len(self.bids)})")
         for line in lines:
-            print(line)
-        print()
+            logger.info(line)
+        # logger.info("")
 
     def display_ask_tree(self):
         lines, *_ = _display_aux(self.asks)
-        print(f"\nAsks AVL Tree (size: {len(self.asks)})")
+        # logger.info("")
+        # logger.info(f"Asks AVL Tree (size: {len(self.asks)})")
         for line in lines:
-            print(line)
-        print()
+            logger.info(line)
+        # logger.info("")
 
     def check(self):
         # Check for consistency with AVL trees
@@ -231,7 +246,6 @@ class LimitLevel:
         return node
 
     def display_tree(self):
-        print()
         display_tree(self.get_root)
 
     @property
@@ -246,10 +260,10 @@ class LimitLevel:
         are treated as zeros."""
 
         right_height = self.right_child.height if self.right_child is not None else 0
-        # print(f"DEBUG: node {self.price}'s right_child height = {right_height}")
+        # logger.debug(f"node {self.price}'s right_child height = {right_height}")
 
         left_height = self.left_child.height if self.left_child is not None else 0
-        # print(f"DEBUG: node {self.price}'s left_child height = {left_height}")
+        # logger.debug(f"node {self.price}'s left_child height = {left_height}")
 
         return right_height - left_height
     
@@ -304,60 +318,63 @@ class LimitLevel:
         """Replaces node in parent on a remove() call."""
         if not self.is_root:
 
-            # print(f"DEBUG: self = {self.price}")
-            # print(f"DEBUG: self.parent = {self.parent.price}")
+            # logger.debug(f"self = {self.price}")
+            # logger.debug(f"self.parent = {self.parent.price}")
 
             if self == self.parent.left_child:
                 self.parent.left_child = new_value
 
                 # debugging
                 # if new_value is not None:
-                #     # print(f"DEBUG: node {self.parent.price} has new left_child node {new_value.price}")
+                #     # logger.debug(f"node {self.parent.price} has new left_child node {new_value.price}")
                 # else:
-                #     # print(f"DEBUG: node {self.parent.price}'s left_child node is now None")
+                #     # logger.debug(f"node {self.parent.price}'s left_child node is now None")
 
             else:
                 self.parent.right_child = new_value
 
                 # debugging
                 # if new_value is not None:
-                #     # print(f"DEBUG: node {self.parent.price} has new right_child node {new_value.price}")
+                #     # logger.debug(f"node {self.parent.price} has new right_child node {new_value.price}")
                 # else:
-                #     # print(f"DEBUG: node {self.parent.price}'s right_child node is now None")
+                #     # logger.debug(f"node {self.parent.price}'s right_child node is now None")
 
         if new_value is not None:
             new_value.parent = self.parent
 
     def remove(self):
         """Deletes this limit level."""
-        # print(f"DEBUG: LimitLevel.remove called on {self}.")
+        # logger.debug(f"LimitLevel.remove called on {self}.")
         # self.display_tree()
 
         if self.left_child is not None and self.right_child is not None:  # two children
 
-            # print(f"DEBUG: Removed node {self.price} has 2 children.")
-            # print(f"DEBUG: Finding smallest node in right subtree and largest node in left subtree.")
+            # logger.debug(f"Removed node {self.price} has 2 children.")
+            # logger.debug(f"Finding smallest node in right subtree and largest node in left subtree.")
             parent = self.parent
             # set successor to the smallest node in right subtree
             successor = self.right_child.min
             # set adopter of successor's left_child to the greatest node in left subtree
             left_adopter = self.left_child.max
             # set adopter of successor's right_child to successor's parent
-            right_adopter = successor.parent
+            # conditional to work around scenario where successor is the right_child
+            right_adopter = successor.parent if self != successor.parent else self
 
             # self.display_tree()
 
-            # print(f"DEBUG: Found successor node {successor.price}, left_child adopter node {left_adopter.price}")
-            # print(f"DEBUG: Replacing removed node with successor", end=', ')
-            # print(f"giving adopter node successor's left children", end=', ')
-            # print(f"and giving successor's parent node successor's right children.")
+            msg = f"Found successor node {successor.price}, left_child adopter node {left_adopter.price}"
+            msg += f", right_child adopter node {right_adopter.price}."
+            # logger.debug(msg)
+            msg = f"Replacing removed node with successor, "
+            msg += f"giving left_adopter and right_adopter respective children."
+            # logger.debug(msg)
 
-            # print(f"DEBUG: successor pre-update: {successor}")
-            # print(f"DEBUG: left_adopter pre-update: {left_adopter}")
-            # print(f"DEBUG: right_adopter pre-update: {right_adopter}")
-            # print(f"DEBUG: parent pre-update: {parent}")
-            # print(f"DEBUG: successor's left child pre-update: {successor.left_child}")
-            # print(f"DEBUG: successor's right child pre-update: {successor.right_child}\n")
+            # logger.debug(f"successor pre-update: {successor}")
+            # logger.debug(f"left_adopter pre-update: {left_adopter}")
+            # logger.debug(f"right_adopter pre-update: {right_adopter}")
+            # logger.debug(f"parent pre-update: {parent}")
+            # logger.debug(f"successor's left child pre-update: {successor.left_child}")
+            # logger.debug(f"successor's right child pre-update: {successor.right_child}")
 
             successor.parent, successor.left_child, \
                 left_adopter.right_child, \
@@ -371,34 +388,12 @@ class LimitLevel:
             if successor != self.right_child:
                 successor.right_child = self.right_child
 
-            # print(f"DEBUG: Swapped inside references.")
-            # print(f"DEBUG: Updating descendant and ancestor references...")
-            # print()
+            # logger.debug(f"Swapped inside references.")
+            # logger.debug(f"Updating descendant and ancestor references...")
 
-            # # copy successor values into current node
-            # self.price = successor.price
-            # self.size = successor.size
-            # self.orders = successor.orders
-            # self.orders.parent_limit = self
-            # # self.lob.order_counts[self.price] = self
-
-            # # remove successor from tree
-            # if successor.right_child is not None:  # minimum node should have left_child = None
-            #     successor.right_child.parent = successor.parent
-            #     successor.parent.left_child = successor.right_child
-            #     self.display_tree()
-            #
-            # if successor.right_child is None:
-            #     # print(f"DEBUG: Setting successor to None...\n")
-            #     if successor == successor.parent.left_child:
-            #         successor.parent.left_child = None
-            #     else:
-            #         successor.parent.right_child = None
-            #     self.display_tree()
-
-            # print(f"DEBUG: final successor: {successor}")
-            # print(f"DEBUG: final left_adopter: {left_adopter}")
-            # print(f"DEBUG: final right_adopter: {right_adopter}")
+            # logger.debug(f"final successor: {successor}")
+            # logger.debug(f"final left_adopter: {left_adopter}")
+            # logger.debug(f"final right_adopter: {right_adopter}")
 
             # Outside References (ancestors, descendants)
             # update ancestor's child reference
@@ -407,7 +402,7 @@ class LimitLevel:
             else:
                 parent.left_child = successor
 
-            # print(f"DEBUG: final parent: {parent}")
+            # logger.debug(f"final parent: {parent}")
 
             # update descendants' parent references
             if left_adopter.right_child is not None:
@@ -419,58 +414,58 @@ class LimitLevel:
             if successor.right_child is not None:
                 successor.right_child.parent = successor
 
-
-            # print(f"DEBUG: final successor's left_child: {successor.left_child}")
-            # print(f"DEBUG: final successor's right_child: {successor.right_child}")
-            # print()
+            # logger.debug(f"final successor's left_child: {successor.left_child}")
+            # logger.debug(f"final successor's right_child: {successor.right_child}")
 
             # self.display_tree()
 
-            # print("DEBUG: Now balancing parent of removed node.")
-            self.balance_parent()
+            # logger.debug(f"Now balancing successor's previous parent node.")
+            if self != right_adopter:
+                right_adopter.balance()
+            else:
+                successor.balance()
 
             # self.display_tree()
 
         elif self.left_child is not None:  # only left child
-            # print(f"DEBUG: Removed node {self.price} only has left child. Attempting to point parent to left child...")
+            # logger.debug(f"Removed node {self.price} only has left child. Attempting to point parent to left child...")
             self._replace_node_in_parent(self.left_child)
-            # print("DEBUG: Now balancing parent of removed node.")
-            self.balance_parent()
+            # logger.debug(f"Now balancing...")
+            self.balance()
             # self.display_tree()
 
         elif self.right_child is not None:  # only right child
-            # print(f"DEBUG: Removed node {self.price} only has right child. Attempting to point parent to right child...")
+            # logger.debug(f"Removed node {self.price} only has right child. Attempting to point parent to right child...")
             self._replace_node_in_parent(self.right_child)
-            # print("DEBUG: Now balancing parent of removed node.")
-            self.balance_parent()
+            # logger.debug(f"Now balancing...")
+            self.balance()
             # self.display_tree()
 
         else:  # no children
-            # print(f"DEBUG: Removed node {self.price} has no children. Clearing parent's child pointer...")
+            # logger.debug(f"Removed node {self.price} has no children. Clearing parent's child pointer...")
             self._replace_node_in_parent()
-            # print("DEBUG: Now balancing parent of removed node.")
-            self.balance_parent()
+            # logger.debug(f"Now balancing...")
+            self.balance()
             # self.display_tree()
 
     def balance_parent(self):
         """Checks if our parent needs balancing."""
-        if self.parent is not None:
-            if self.parent.is_root:  # if our parent is root, we do nothing
-                # print("DEBUG: Parent is root, do nothing.")
-                pass
-            else:  # tell grandpa to check his balance
-                # print("DEBUG: Parent is not root, checking balance...")
-                self.parent.balance()
+        if self.parent.is_root:  # if our parent is root, we do nothing
+            # logger.debug(f"Parent is root, do nothing.")
+            pass
+        else:  # tell grandpa to check his balance
+            # logger.debug(f"Parent is not root, checking balance...")
+            self.parent.balance()
 
     def balance_grandpa(self):
         """Checks if our grandpa needs balancing."""
-        # print(f"DEBUG: Grandpa node of {self} is {self.grandpa}.")
+        # logger.debug(f"Grandpa node of {self} is {self.grandpa}.")
         if self.grandpa is not None:
             if self.grandpa.is_root:  # if our grandpa is root, we do nothing
-                # print("DEBUG: Grandpa is root, do nothing.")
+                # logger.debug(f"Grandpa is root, do nothing.")
                 pass
             else:  # tell grandpa to check his balance
-                # print("DEBUG: Grandpa is not root, checking balance...")
+                # logger.debug(f"Grandpa is not root, checking balance...")
                 self.grandpa.balance()
 
     def check_pointer_validity(self):
@@ -504,36 +499,31 @@ class LimitLevel:
         """Call the rotation method relevant to this Node's balance factor.
          This call works itself up the tree recursively."""
 
-        # print(f"DEBUG: Balance factor on node {self.price} = {self.balance_factor}")
+        # logger.debug(f"Balance factor on node {self.price} = {self.balance_factor}")
 
         if self.balance_factor > 1:  # right is too heavy
-            # print(f"DEBUG: Balance factor on node {self.right_child.price} = {self.right_child.balance_factor}")
+            # logger.debug(f"Balance factor on node {self.right_child.price} = {self.right_child.balance_factor}")
             if self.right_child.balance_factor < 0:  # right_child's left is heavier, RL case
-                # print(f"DEBUG: Rotating nodes for RL Case.")
+                # logger.debug(f"Rotating nodes for RL Case.")
                 self._rl_case()
             elif self.right_child.balance_factor >= 0:  # right_child's right is heavier, RR case
-                # print(f"DEBUG: Rotating nodes for RR Case.")
+                # logger.debug(f"Rotating nodes for RR Case.")
                 self._rr_case()
             # self.display_tree()
         elif self.balance_factor < -1:  # left is too heavy
-            # print(f"DEBUG: Balance factor on node {self.left_child.price} = {self.left_child.balance_factor}")
+            # logger.debug(f"Balance factor on node {self.left_child.price} = {self.left_child.balance_factor}")
             if self.left_child.balance_factor <= 0:  # left_child's left is heavier, LL case
-                # print(f"DEBUG: Rotating nodes for LL Case.")
+                # logger.debug(f"Rotating nodes for LL Case.")
                 self._ll_case()
             elif self.left_child.balance_factor > 0:  # left_child's right is heavier, LR case
-                # print(f"DEBUG: Rotating nodes for LR Case.")
+                # logger.debug(f"Rotating nodes for LR Case.")
                 self._lr_case()
             # self.display_tree()
         else:
-            # print(f"DEBUG: No balancing necessary.")
+            # logger.debug(f"No balancing necessary.")
             pass
 
-        # print(f"DEBUG: Now checking balance of parent node {self.parent.price}...")
-        if not self.parent.is_root:  # Now check upwards
-            self.parent.balance()
-        else:
-            # print(f"DEBUG: Node {self.parent.price} is root. Ending balancing...")
-            pass
+        self.balance_parent()
 
     def _ll_case(self):
         """Rotate Nodes for LL Case.
@@ -585,12 +575,12 @@ class LimitLevel:
         child, grand_child, parent = \
             self.left_child, self.left_child.right_child, self.parent
 
-        # print(f"DEBUG: grand_child pre-update - {grand_child}")
-        # print(f"DEBUG: child pre-update - {child}")
-        # print(f"DEBUG: self pre-update - {self}")
-        # print(f"DEBUG: ancestor pre-update - {parent}")
-        # print(f"DEBUG: grand_child's left child pre-update - {grand_child.left_child}")
-        # print(f"DEBUG: grand_child's right child pre-update - {grand_child.right_child}")
+        # logger.debug(f"grand_child pre-update - {grand_child}")
+        # logger.debug(f"child pre-update - {child}")
+        # logger.debug(f"self pre-update - {self}")
+        # logger.debug(f"ancestor pre-update - {parent}")
+        # logger.debug(f"grand_child's left child pre-update - {grand_child.left_child}")
+        # logger.debug(f"grand_child's right child pre-update - {grand_child.right_child}")
 
         # Inside References (self, child, grand_child)
         # update grandchild's pointers
@@ -605,9 +595,9 @@ class LimitLevel:
             grand_child, grand_child.left_child, \
             grand_child, grand_child.right_child
 
-        # print(f"DEBUG: final top - {grand_child}")
-        # print(f"DEBUG: final left - {child}")
-        # print(f"DEBUG: final right - {self}")
+        # logger.debug(f"final top - {grand_child}")
+        # logger.debug(f"final left - {child}")
+        # logger.debug(f"final right - {self}")
 
         # Outside References (ancestors, descendants)
         # update ancestor's child reference
@@ -615,7 +605,7 @@ class LimitLevel:
             parent.right_child = grand_child
         else:
             parent.left_child = grand_child
-        # print(f"DEBUG: ancestor final - {parent}")
+        # logger.debug(f"ancestor final - {parent}")
 
         # update descendants' parent reference
         if child.right_child is not None:
@@ -623,8 +613,8 @@ class LimitLevel:
         if self.left_child is not None:
             self.left_child.parent = self
 
-        # print(f"DEBUG: final left, right - {grand_child.left_child}")
-        # print(f"DEBUG: final right, left - {grand_child.right_child}")
+        # logger.debug(f"final left, right - {grand_child.left_child}")
+        # logger.debug(f"final right, left - {grand_child.right_child}")
 
     def _rl_case(self):
         r"""Rotate Nodes for RL Case.
@@ -642,14 +632,12 @@ class LimitLevel:
         child, grand_child, parent = \
             self.right_child, self.right_child.left_child, self.parent
 
-        print()
-        # print(f"DEBUG: grand_child pre-update - {grand_child}")
-        # print(f"DEBUG: child pre-update - {child}")
-        # print(f"DEBUG: self pre-update - {self}")
-        # print(f"DEBUG: ancestor pre-update - {parent}")
-        # print(f"DEBUG: grand_child's left child pre-update - {grand_child.left_child}")
-        # print(f"DEBUG: grand_child's right child pre-update - {grand_child.right_child}")
-        print()
+        # logger.debug(f"grand_child pre-update - {grand_child}")
+        # logger.debug(f"child pre-update - {child}")
+        # logger.debug(f"self pre-update - {self}")
+        # logger.debug(f"ancestor pre-update - {parent}")
+        # logger.debug(f"grand_child's left child pre-update - {grand_child.left_child}")
+        # logger.debug(f"grand_child's right child pre-update - {grand_child.right_child}")
 
         # Inside References (self, child, grand_child)
         # update grandchild's pointers
@@ -664,9 +652,9 @@ class LimitLevel:
             grand_child, grand_child.right_child, \
             grand_child, grand_child.left_child
 
-        # print(f"DEBUG: final top - {grand_child}")
-        # print(f"DEBUG: final left - {self}")
-        # print(f"DEBUG: final right - {child}")
+        # logger.debug(f"final top - {grand_child}")
+        # logger.debug(f"final left - {self}")
+        # logger.debug(f"final right - {child}")
 
         # Outside References (ancestors, descendants)
         # update ancestor's child pointers
@@ -674,7 +662,7 @@ class LimitLevel:
             parent.right_child = grand_child
         else:
             parent.left_child = grand_child
-        # print(f"DEBUG: ancestor final - {parent}")
+        # logger.debug(f"ancestor final - {parent}")
 
         # update descendants' parent pointers
         if child.left_child is not None:
@@ -682,8 +670,8 @@ class LimitLevel:
         if self.right_child is not None:
             self.right_child.parent = self
 
-        # print(f"DEBUG: final left, right - {grand_child.left_child}")
-        # print(f"DEBUG: final right, left - {grand_child.right_child}")
+        # logger.debug(f"final left, right - {grand_child.left_child}")
+        # logger.debug(f"final right, left - {grand_child.right_child}")
 
     def get_child_count(self):
         node_count = 0
@@ -739,16 +727,16 @@ class LimitLevelTree:
     def insert(self, order):
         """Iterative AVL Insert method to insert a new order."""
         current_node = self
-        # print(f"DEBUG: Inserting {order}")
+        # logger.debug(f"Inserting {order}")
 
         while True:
             if current_node.is_root or order.price > current_node.price:
                 if current_node.right_child is None:  # create new node in AVL tree to add order into
                     current_node.right_child = LimitLevel(order)
-                    # print(f"DEBUG: Inserted order into new LimitLevel {current_node.right_child.price}")
+                    # logger.debug(f"Inserted order into new LimitLevel {current_node.right_child.price}")
                     current_node.right_child.parent = current_node  # set new limit level's parent
                     # self.display_tree()  # debugging
-                    # print(f"DEBUG: Calling balance grandpa on new node.")
+                    # logger.debug(f"Calling balance grandpa on new node.")
                     current_node.right_child.balance_grandpa()
                     break
                 else:
@@ -758,10 +746,10 @@ class LimitLevelTree:
             elif order.price < current_node.price:
                 if current_node.left_child is None:  # create new node in AVL tree to add order into
                     current_node.left_child = LimitLevel(order)
-                    # print(f"DEBUG: Inserted order into new node {current_node.left_child.price}")
+                    # logger.debug(f"Inserted order into new node {current_node.left_child.price}")
                     current_node.left_child.parent = current_node  # set new limit levels' parent
                     # self.display_tree()  # debugging
-                    # print(f"DEBUG: Calling balance grandpa on new node.")
+                    # logger.debug(f"Calling balance grandpa on new node.")
                     current_node.left_child.balance_grandpa()
                     break
                 else:
@@ -775,7 +763,7 @@ class LimitLevelTree:
     def remove(self, order):
         """Iterative AVL remove method to remove an order from an existing Node."""
         current_node = self
-        # print(f"DEBUG: Removing {order}")
+        # logger.debug(f"Removing {order}")
 
         while True:
             if current_node.is_root or order.price > current_node.price:
@@ -790,9 +778,9 @@ class LimitLevelTree:
 
     def find_node(self, order):
         current_node = self
-        # print(f"DEBUG: Looking for node {order.price}...")
+        # logger.debug(f"Looking for node {order.price}...")
         while True:
-            # print(f"DEBUG: current_node = {current_node}")
+            # logger.debug(f"current_node = {current_node}")
             if current_node.is_root or order.price > current_node.price:
                 current_node = current_node.right_child
                 continue
@@ -960,19 +948,20 @@ class Order:
 
 
 def display_tree(tree: LimitLevelTree):
-    print()
+    # print()
     lines, *_ = _display_aux(tree)
-    print(f"\nDEBUG: AVL Tree (size: {len(tree)})")
+    # logger.debug(f"AVL Tree (size: {len(tree)})")
     for line in lines:
-        print("DEBUG: ", line)
-    print()
+        # logger.debug(line)
+        pass
+    # print()
 
 
 def _display_aux(node):
     """Returns list of strings, width, height, and horizontal coordinate of the root."""
 
     # debugging
-    # print(f"DEBUG: {node}")
+    # logger.debug(f"{node}")
 
     # No child
     if node.right_child is None and node.left_child is None:
