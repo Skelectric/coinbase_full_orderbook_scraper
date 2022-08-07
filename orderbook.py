@@ -4,6 +4,7 @@ import time
 from itertools import islice
 import trace
 from collections import deque
+import copy
 
 
 class LimitOrderBook:
@@ -12,19 +13,28 @@ class LimitOrderBook:
         self.bids = LimitLevelTree()
         self.asks = LimitLevelTree()
         
-        self.bid_levels = {}  # price : size
-        self.ask_levels = {}  # price : size
+        self.__bid_levels = {}  # price : size
+        self.__ask_levels = {}  # price : size
 
         self.orders = {}  # order ids
 
+        self.__timestamp = None
+
+    @property
+    def empty(self) -> bool:
+        if len(self.bids) == 0 and len(self.asks) == 0:
+            return True
+        else:
+            return False
+
     @property
     def best_bid(self):
-        price = sorted(self.bid_levels.keys(), reverse=True)[0] if self.bid_levels != {} else None
+        price = sorted(self.__bid_levels.keys(), reverse=True)[0] if self.__bid_levels != {} else None
         return price
 
     @property
     def best_ask(self):
-        price = sorted(self.ask_levels.keys())[0] if self.ask_levels != {} else None
+        price = sorted(self.__ask_levels.keys())[0] if self.__ask_levels != {} else None
         return price
 
     @property
@@ -64,6 +74,7 @@ class LimitOrderBook:
         If the Limit Level is then empty, it is also removed from the book's relevant tree.
         If the removed LimitLevel was either the top bid or ask, it is replaced
         by the next best value."""
+        self.__timestamp = order.timestamp
 
         # Remove Order from self.orders
         try:
@@ -78,9 +89,9 @@ class LimitOrderBook:
 
         # reduce size of price level
         if popped_order.is_bid:
-            self.bid_levels[popped_order.price] -= popped_order.size
+            self.__bid_levels[popped_order.price] -= popped_order.size
         else:
-            self.ask_levels[popped_order.price] -= popped_order.size
+            self.__ask_levels[popped_order.price] -= popped_order.size
 
         # get corresponding limit_level and order_list
         limit_level = self.get_limit_level(popped_order)
@@ -91,9 +102,9 @@ class LimitOrderBook:
             # print(f"DEBUG: root order list has 0 orders remaining.")
 
             if popped_order.is_bid:
-                self.bid_levels.pop(popped_order.price)
+                self.__bid_levels.pop(popped_order.price)
             else:
-                self.ask_levels.pop(popped_order.price)
+                self.__ask_levels.pop(popped_order.price)
 
             assert isinstance(limit_level, LimitLevel)
             limit_level.remove()
@@ -105,48 +116,54 @@ class LimitOrderBook:
     def add(self, order):
         """Inserts order into AVL tree and updates best bid and best ask."""
         self.orders[order.uid] = order
+        self.__timestamp = order.timestamp
 
         # insert order into tree and update bid_levels/ask_levels
         if order.is_bid:
             self.bids.insert(order)
 
-            if order.price not in self.bid_levels:
-                self.bid_levels[order.price] = order.size
+            if order.price not in self.__bid_levels:
+                self.__bid_levels[order.price] = order.size
             else:
-                self.bid_levels[order.price] += order.size
+                self.__bid_levels[order.price] += order.size
 
         else:
             self.asks.insert(order)
 
-            if order.price not in self.ask_levels:
-                self.ask_levels[order.price] = order.size
+            if order.price not in self.__ask_levels:
+                self.__ask_levels[order.price] = order.size
             else:
-                self.ask_levels[order.price] += order.size
+                self.__ask_levels[order.price] += order.size
 
-    def levels(self, depth=None) -> dict:
-        """Returns the price levels as a dict {'bids': [bid1, ...], 'asks': [ask1, ...]}
+    @property
+    def levels(self, depth=None) -> tuple[dict, dict]:
 
-        :param depth: Desired number of levels on each side to return.
-        :return:
-        """
+        if depth is not None:
 
-        bids = []
-        asks = []
+            bids = []
+            asks = []
 
-        if self.best_bid is not None:
-            bids = list(islice(self.bid_levels.keys(), depth)) if depth else list(self.bid_levels.keys())
-            bids.sort(reverse=True)
+            if self.best_bid is not None:
+                bids = list(islice(self.__bid_levels.keys(), depth))
+                bids.sort(reverse=True)
 
-        if self.best_ask is not None:
-            asks = list(islice(self.ask_levels.keys(), depth)) if depth else list(self.ask_levels.keys())
-            asks.sort()
+            if self.best_ask is not None:
+                asks = list(islice(self.__ask_levels.keys(), depth))
+                asks.sort()
 
-        levels_dict = {
-            'bids': [price for price in bids],
-            'asks': [price for price in asks],
-        }
+            bid_levels = {price: size for price, size in self.__bid_levels.items() if price in bids}
+            ask_levels = {price: size for price, size in self.__ask_levels.items() if price in asks}
 
-        return levels_dict
+        else:
+
+            bid_levels = copy.deepcopy(self.__bid_levels)
+            ask_levels = copy.deepcopy(self.__ask_levels)
+
+        return bid_levels, ask_levels
+
+    @property
+    def timestamp(self):
+        return copy.deepcopy(self.__timestamp)
 
     def display_bid_tree(self):
         lines, *_ = _display_aux(self.bids)
@@ -164,8 +181,8 @@ class LimitOrderBook:
 
     def check(self):
         # Check for consistency with AVL trees
-        assert len(self.bids) == len(self.levels()["bids"])
-        assert len(self.asks) == len(self.levels()["asks"])
+        assert len(self.bids) == len(self.levels[0])
+        assert len(self.asks) == len(self.levels[1])
 
         # Check that all pointers within AVL trees are correct
         self.bids.check_pointer_validity()

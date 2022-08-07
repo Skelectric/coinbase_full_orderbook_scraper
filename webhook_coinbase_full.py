@@ -16,8 +16,11 @@ import itertools
 from collections import defaultdict
 from GracefulKiller import GracefulKiller
 from orderbook import LimitOrderBook, Order
+import copy
 
+import matplotlib
 import matplotlib.pyplot as plt
+matplotlib.use('TkAgg')
 
 import pandas as pd
 import numpy as np
@@ -27,12 +30,14 @@ pd.options.display.float_format = '{:.6f}'.format
 # ======================================================================================
 # Script Parameters
 
-WEBHOOK_ONLY = False
+WEBHOOK_ONLY = True
 
-DUMP_FEED_INTO_JSON = False
-LOAD_FEED_FROM_JSON = True  # If true, no webhook
+DUMP_FEED_INTO_JSON = True
+LOAD_FEED_FROM_JSON = False  # If true, no webhook
 
-JSON_FILEPATH = "data/full_SNX-USD_dump_20220802-134751.json"  # for testing only
+PLOT_DEPTH_CHART = True
+
+JSON_FILEPATH = "data/full_SNX-USD_dump_20220802-134751.json"  # for simulating feed
 
 # ======================================================================================
 # Webhook Parameters
@@ -63,13 +68,19 @@ logger.add(
 
 # ======================================================================================
 
-s_print_lock = Lock()
+s_lock = Lock()
 
 
 def s_print(*args, **kwargs):
     """Thread-safe print function with colors."""
-    with s_print_lock:
+    with s_lock:
         print(*args, **kwargs)
+
+
+def s_(func):
+    """Thread-safe function wrapper."""
+    with s_lock:
+        func
 
 
 class WebsocketClient:
@@ -125,7 +136,7 @@ class WebsocketClient:
                 if msg != {}:
                     self.display_msg(msg)
 
-                    # For testing purposes only! Delete later
+                    # For testing purposes only
                     if DUMP_FEED_INTO_JSON:
                         json_msgs.append(msg)
 
@@ -273,7 +284,7 @@ class WebsocketClientHandler:
 
 class QueueWorker:
     """Build limit orderbook from msgs in queue"""
-    def __init__(self, _queue: queue.Queue, output_queue: queue.Queue):
+    def __init__(self, _queue: queue.Queue, output_queue: queue.Queue = None):
         self.lob = LimitOrderBook()
         self.last_sequence = 0
 
@@ -281,9 +292,7 @@ class QueueWorker:
         self.delay = 2  # seconds
 
         self.output_queue = output_queue
-
-        self.output_freq = 4  # output every 10 items
-        self.output_counter = 0
+        self.output_item_counter = 0
 
         # queue stats
         self.timer = Timer()
@@ -327,7 +336,7 @@ class QueueWorker:
         self.queue_stats_timer.start()
         # logger.info(f"Queue worker starting in {self.delay} seconds...")
         # time.sleep(self.delay)
-        # logger.info(f"Queue worker starting now. Starting queue size: {self.queue.qsize()} items")
+        logger.info(f"Queue worker starting now. Starting queue size: {self.queue.qsize()} items")
 
         # self.track_qsize()
 
@@ -359,17 +368,21 @@ class QueueWorker:
                 time.sleep(self.delay)
                 pass
 
-            if self.finish_up:
-                logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
-
-            if self.finish_up and queue.Empty:
+            # check on main thread -> wrap it up if main thread broke
+            if not threading.main_thread().is_alive() and not self.finish_up:
+                logger.critical("Main thread is dead! Clearing queues and ending.")
+                self.queue.queue.clear()
+                self.output_queue.queue.clear()
+                logger.info("Queues cleared.")
                 break
 
-        logger.info("Queue worker has finished.")
+            if self.finish_up and self.queue.empty():
+                logger.info("Queue worker has finished.")
+                break
 
     def process_item(self, item: dict) -> None:
 
-        print("------------------------------------------------------------------------")
+        s_print("------------------------------------------------------------------------")
         # print(f"item = {item}")
 
         item_type, sequence, order_id, \
@@ -411,14 +424,15 @@ class QueueWorker:
                     price=float(price),
                     timestamp=timestamp
                 )
-                print(colored("OPEN", 'green'), end=' ')
-                print(f"Order -- {side} {remaining_size} units @ {price}", end=' ')
-                print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
+                s_print(colored("OPEN", 'green'), end=' ')
+                s_print(f"Order -- {side} {remaining_size} units @ {price}", end=' ')
+                s_print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
 
                 self.lob.process(order, action="add")
 
-                self.display_orderbook_info()
+                # self.display_orderbook_info()
                 self.lob.check()
+                self.output_depth_chart_data()
 
             # process order cancels
             case "done" if valid_done and valid_sequence:
@@ -429,18 +443,19 @@ class QueueWorker:
                     price=None,
                     timestamp=timestamp,
                 )
-                print(colored("CLOSE", 'red'), end=' ')
-                print(f"Order -- {side} {remaining_size} units @ {price}", end=' ')
-                print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
+                s_print(colored("CLOSE", 'red'), end=' ')
+                s_print(f"Order -- {side} {remaining_size} units @ {price}", end=' ')
+                s_print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
 
                 popped_order = self.lob.process(order, action="remove")
 
-                self.display_orderbook_info()
+                # self.display_orderbook_info()
                 self.lob.check()
+                self.output_depth_chart_data()
 
             case "match" if valid_sequence:
-                print("MATCH", end=' ')
-                print(item)
+                s_print("MATCH", end=' ')
+                s_print(item)
                 # Todo
                 # self.last_sequence = item["sequence"]
                 # order = Order(
@@ -452,72 +467,50 @@ class QueueWorker:
                 # self.lob.process(order)
 
             case "received" if valid_sequence:
-                print("RECEIVED", end=' ')
-                print(item)
+                s_print("RECEIVED", end=' ')
+                s_print(item)
                 # Todo
                 
             case _ if not valid_sequence:
-                print(f"Item below provided out of sequence (current={self.last_sequence}, provided={sequence})")
-                print(f"{item}")
-                print("Skipping processing...")
+                s_print(f"Item below provided out of sequence (current={self.last_sequence}, provided={sequence})")
+                s_print(f"{item}")
+                s_print("Skipping processing...")
 
             case _:
                 raise ValueError("Unhandled msg type")
 
     def display_orderbook_info(self):
-        # Debugging
-        # print("\n_________orderbook_________")
-        # levels = self.lob.levels()
-        # print(f"levels = {levels}")
-        # orders = self.lob.orders
-        # print(f"orders = {orders}")
-        if self.lob.levels() is not None:
-            # print(f"levels bid count = {len(levels['bids'])}")
-            # print(f"levels ask count = {len(levels['asks'])}")
+        s_print("\n_________orderbook_________")
+        levels = self.lob.levels
+        s_print(f"levels = {levels}")
 
-            top_level = self.lob.top_level
-            # print(f"top level = {top_level}")
+        orders = self.lob.orders
+        s_print(f"orders = {orders}")
 
-            # self.lob.display_bid_tree()
-            # self.lob.display_ask_tree()
-            # print()
+        s_print(f"levels bid count = {len(levels[0])}")
+        s_print(f"levels ask count = {len(levels[1])}")
 
-            self.output_counter += 1
-            if self.output_counter > self.output_freq and None not in top_level:
-                self.output_counter = 0
-                self.update_depth_chart_data()
+        top_level = self.lob.top_level
+        s_print(f"top level = {top_level}")
 
-    def update_depth_chart_data(self):
-        # get bid_levels and ask_levels, place into numpy arrays, and sort
-        bids = np.fromiter(self.lob.bid_levels.items(), dtype="f,f")
-        asks = np.fromiter(self.lob.ask_levels.items(), dtype="f,f")
-        bids.sort()
-        asks.sort()
+        self.lob.display_bid_tree()
+        self.lob.display_ask_tree()
+        s_print()
 
-        # split bids into prices and sizes (reverse order for bids only)
-        bid_prices = np.vectorize(lambda x: x[0])(bids[::-1])
-        bid_sizes = np.vectorize(lambda x: x[1])(bids[::-1])
-        ask_prices = np.vectorize(lambda x: x[0])(asks)
-        ask_sizes = np.vectorize(lambda x: x[1])(asks)
-
-        # calculate order depth
-        bid_depth = np.cumsum(bid_sizes)
-        ask_depth = np.cumsum(ask_sizes)
-
-        # for bids only: zip, sort and split
-        bid_depth_zip = np.fromiter(zip(bid_prices, bid_depth), dtype='f,f')
-        bid_depth_zip.sort()
-        bid_prices = np.vectorize(lambda x: x[0])(bid_depth_zip)
-        bid_depth = np.vectorize(lambda x: x[1])(bid_depth_zip)
-
-        # set x and y values
-        x = np.concatenate((bid_prices, ask_prices))
-        y = np.concatenate((bid_depth, ask_depth))
-
-        self.send_output((x, y))
+    def output_depth_chart_data(self):
+        if self.output_queue is not None:
+            self.output_item_counter += 1
+            timestamp = datetime.strptime(self.lob.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%m/%d/%Y-%H:%M:%S")
+            bid_levels, ask_levels = self.lob.levels
+            # logger.debug(f"PLACING item {self.output_item_counter}: bid_levels {bid_levels}")
+            # logger.debug(f"PLACING item {self.output_item_counter}: ask_levels {ask_levels}")
+            self.send_output((self.output_item_counter, timestamp, bid_levels, ask_levels))
 
     def send_output(self, item):
-        self.output_queue.put(item)
+        if self.output_queue is not None:
+            self.output_queue.put(item)
+            count, *_ = item
+            # logger.debug(f"Queue worker placed item {count} into output queue. Output queue size = {self.output_queue.qsize()}")
 
     @staticmethod
     def display_subscription(item: dict):
@@ -529,6 +522,93 @@ class QueueWorker:
 
     def finish(self) -> None:
         self.finish_up = True
+        logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
+
+
+class DepthChartPlotter:
+    # Todo: Build multi-orderbook support
+    def __init__(self):
+        self.queue = queue.Queue()
+        plt.ion()
+        plt.style.use('dark_background')
+        # self.fig, self.ax = plt.subplots(sharex=True, sharey=True)
+        self.fig = plt.figure(figsize=(9, 6))
+        self.ax = self.fig.add_subplot()
+        self.timestamp = None
+        logger.debug("DepthChartPlotter initialized.")
+        self.item_num = None
+        self.skip_item_freq = 5
+
+    def plot(self):
+        # logger.debug(f"Plotting data #{self.item_num}")
+        if not self.queue.empty():
+            bid_prices, bid_depth, ask_prices, ask_depth = self.get_data()
+
+            if self.ax.lines:  # clear previously drawn lines
+                self.ax.cla()
+
+            self.ax.set_xlabel('Price')
+            self.ax.set_ylabel('Quantity')
+
+            if bid_prices is not None:
+                self.ax.step(bid_prices, bid_depth, color="green")
+                plt.fill_between(bid_prices, bid_depth, facecolor="green", step='pre', alpha=0.2)
+
+            if ask_prices is not None:
+                self.ax.step(ask_prices, ask_depth, color="red")
+                plt.fill_between(ask_prices, ask_depth, facecolor="red", step='pre', alpha=0.2)
+
+            self.ax.spines['bottom'].set_position('zero')
+
+            self.fig.suptitle(f"Market Depth")
+            self.ax.set_title(f"{self.timestamp} - queue size: {self.queue.qsize()}")
+
+            self.fig.canvas.flush_events()  # Todo: read more about what this does
+            self.fig.canvas.draw()
+
+        else:
+            # logger.debug(f"Plotting queue is empty. Sleeping for 2 second.")
+            plt.pause(2)
+            pass
+
+    def get_data(self):
+
+        if self.queue.qsize() > self.skip_item_freq:
+            for i in range(self.skip_item_freq):
+                _ = self.queue.get()
+
+        self.item_num, self.timestamp, bid_levels, ask_levels = self.queue.get()
+        self.queue.task_done()
+        # logger.debug(f"RETRIEVING item {self.item_num}: bid_levels : {bid_levels}")
+        # logger.debug(f"RETRIEVING item {self.item_num}: ask_levels : {ask_levels}")
+        return self.transform_data(bid_levels, ask_levels)
+
+    @staticmethod
+    def transform_data(bid_levels, ask_levels) -> tuple:
+        bid_prices, bid_depth, ask_prices, ask_depth = None, None, None, None
+
+        if bid_levels != {}:
+            # get bid_levels and ask_levels, place into numpy arrays, and sort
+            bids = np.fromiter(bid_levels.items(), dtype="f,f")
+            bids.sort()
+            # split into prices and sizes (reverse order for bids only)
+            bid_prices = np.vectorize(lambda x: x[0])(bids[::-1])
+            bid_sizes = np.vectorize(lambda x: x[1])(bids[::-1])
+            # calculate order depth
+            bid_depth = np.cumsum(bid_sizes)
+            # for bids only, zip, sort and split to reverse order again
+            bid_depth_zip = np.fromiter(zip(bid_prices, bid_depth), dtype='f,f')
+            bid_depth_zip.sort()
+            bid_prices = np.vectorize(lambda x: x[0])(bid_depth_zip)
+            bid_depth = np.vectorize(lambda x: x[1])(bid_depth_zip)
+        if ask_levels != {}:  # repeat for asks
+            asks = np.fromiter(ask_levels.items(), dtype="f,f")
+            asks.sort()
+            ask_prices = np.vectorize(lambda x: x[0])(asks)
+            ask_sizes = np.vectorize(lambda x: x[1])(asks)
+            ask_depth = np.cumsum(ask_sizes)
+
+        return bid_prices, bid_depth, ask_prices, ask_depth
 
 
 def main():
@@ -545,40 +625,24 @@ def main():
         for i, (market, channel) in enumerate(itertools.product(MARKETS, CHANNELS)):
             ws_handler.add(WebsocketClient(api=api, channel=channel, market=market, data_queue=data_queue))
 
-    # if not WEBHOOK_ONLY:
-    #     queue_worker = QueueWorker(data_queue)
-
-    # # keep main() from ending before threads are shut down, unless queue worker broke
-    # while not killer.kill_now:
-    #     time.sleep(1)
-    #     if not WEBHOOK_ONLY and not queue_worker.thread.is_alive():
-    #         killer.kill_now = True
-
-    # initialize plotting objects
-    plotting_queue = queue.Queue()
-
-    plt.ion()
-    plt.style.use('dark_background')
-    fig, ax = plt.subplots()
-    fig.suptitle("Order depth")
-
+    # initialize plotter and queue_worker if not webhook-only mode
     if not WEBHOOK_ONLY:
-        queue_worker = QueueWorker(data_queue, plotting_queue)
+        if PLOT_DEPTH_CHART:
+            plotter = DepthChartPlotter()
+            queue_worker = QueueWorker(data_queue, plotter.queue)
+        else:
+            queue_worker = QueueWorker(data_queue)
 
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
 
-        # run plotting functions
-        if plotting_queue.empty():
-            pass
+        # run plotter
+        if PLOT_DEPTH_CHART and not WEBHOOK_ONLY:
+            plotter.plot()
         else:
-            x, y = plotting_queue.get()
-            plotting_queue.task_done()
-            ax.step(x, y)
-            fig.canvas.flush_events()
-            fig.canvas.draw()
-            ax.cla()
+            time.sleep(1)
 
+        # send kill thread signal if queue worker breaks
         if not WEBHOOK_ONLY and not queue_worker.thread.is_alive():
             killer.kill_now = True
 
@@ -593,11 +657,15 @@ def main():
         if queue_worker.thread.is_alive():
             queue_worker.thread.join()
 
-        logger.info(f"Remaining queue size: {data_queue.qsize()}")
+        logger.info(f"Remaining data queue size: {data_queue.qsize()}")
+        # logger.info(f"Remaining plotter queue size: {plotter.queue.qsize()}")
         if data_queue.qsize() != 0:
-            logger.warning("Queue worker did not finish processing the queue! Clearing it now...")
+            logger.warning("Queue worker did not finish processing the queue! Clearing all queues now...")
             data_queue.queue.clear()
-            logger.info(f"Queue cleared.")
+            plotter.queue.queue.clear()
+            logger.info(f"Remaining data queue size: {data_queue.qsize()}")
+            # logger.info(f"Remaining plotter queue size: {plotter.queue.qsize()}")
+            logger.info(f"Queues cleared.")
 
 
 if __name__ == '__main__':
