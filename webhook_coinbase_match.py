@@ -17,10 +17,11 @@ import os
 import sys
 import itertools
 from collections import defaultdict
-import re
-from pathlib import Path
 
 import pandas as pd
+
+from worker_dataframes import MatchDataFrame, CandleDataFrame
+
 pd.options.display.float_format = '{:.6f}'.format
 
 # ======================================================================================
@@ -61,9 +62,9 @@ logger.add(
 
 # ======================================================================================
 
-s_print_lock = Lock()
 def s_print(*args, **kwargs):
     """Thread-safe print function with colors."""
+    s_print_lock = Lock()
     with s_print_lock:
         print(*args, **kwargs)
 
@@ -145,14 +146,15 @@ class WebsocketClient:
         logger.info(f"Closed websocket for {self.id}.")
         self.running = False
 
-    def parse_msg(self, msg: dict) -> pd.DataFrame:
+    def parse_msg(self, msg: dict):
 
         if "type" in msg and msg["type"] in {"last_match", "match"}:
-            _msg = {key: value for key, value in msg.items() if key in self.relevant_match_fields}
-            _msg["time"] = datetime.strptime(_msg.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
-            self.display_match(_msg)
-            item = pd.DataFrame(columns=self.relevant_match_fields, data=[_msg])
-            return item
+            # _msg = {key: value for key, value in msg.items() if key in self.relevant_match_fields}
+            # _msg["time"] = datetime.strptime(_msg.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
+            # self.display_match(_msg)
+            # item = pd.DataFrame(columns=self.relevant_match_fields, data=[_msg])
+            # return item
+            return msg
 
         elif "type" in msg and msg["type"] == "subscriptions":
 
@@ -293,238 +295,6 @@ class WebsocketClientHandler:
         return [x.id for x in self.websocket_clients]
 
 
-class WorkerDataFrame:
-    def __init__(self, df_type: str):
-        self.exchange = EXCHANGE
-        self.df = pd.DataFrame()
-        self.df_type = df_type
-        self.filename_args = None
-        self.filename = None
-        self.total_items = 0
-        self.path = Path("/data")
-
-    def clear(self) -> None:  # return clear dataframe
-        self.df = self.df.iloc[0:0]
-
-    def append_tuple(self, data: tuple) -> None:  # append list
-        _, col = self.df.shape
-        if col == len(data):
-            self.df.loc[len(self.df)] = data
-        else:
-            raise ValueError(f"Length mismatch. There are {col} columns, but {len(data)} elements to append.")
-        self.total_items += 1
-
-    def concat(self, data: pd.DataFrame) -> None:  # append dataframe
-        self.df = pd.concat([self.df, data])
-        self.total_items += 1
-
-    def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename_flag: bool = False) -> None:
-        """Save dataframe chunk using append."""
-
-        if self.is_empty:  # filename can't be derived if dataframe is empty
-            logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")
-            return
-
-        file_exists = Path(f"data/{self.filename}").is_file()
-
-        if self.filename is not None:
-            logger.debug(f"data/{self.filename} exists: {file_exists}")
-
-            if not file_exists:
-                logger.debug(f"{self.filename} doesn't exist. Creating new one...")
-                header = True
-                self.derive_df_filename()
-            else:
-                logger.debug(f"OK... File exists. Header set to False.")
-                header = False
-
-        else:  # append with headers only if file doesn't exist yet.
-            logger.debug(f"No filename generated for {self.df_type} dataframe yet.")
-            logger.debug(f"Setting header to True and deriving new filename...")
-            header = True
-            self.derive_df_filename()
-
-        if csv:
-
-            if Path(f"data/{self.filename}").suffix != '.csv':  # append extension if doesn't exist
-                self.filename = self.filename + ".csv"
-
-            if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
-                logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
-                self.update_filename(extension='.csv')
-
-            self.df.to_csv(rf"data/{self.filename}", index=False, mode='a', header=header)
-            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.")
-
-        if hdf:
-
-            if Path(f"data/{self.filename}").suffix != '.hdf':  # append extension if doesn't exist
-                self.filename = self.filename + ".hdf"
-
-            if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
-                logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
-                self.update_filename(extension='.hdf')
-
-            self.df.to_hdf(rf"data/{self.filename}", key='df', mode='a')
-            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.")
-            
-    def update_filename(self, extension: str) -> None:
-        prev_filename = self.filename
-        self.derive_df_filename()
-        self.filename = self.filename + extension
-        os.rename(f"data/{prev_filename}", f"data/{self.filename})")
-        logger.debug(f"Renamed file from {prev_filename} to {self.filename}...")
-
-    def derive_df_filename(self) -> None:
-
-        def kwarg_it(__template: str) -> list:
-            __template = re.sub(r"{", "{kwargs['", re.sub(r"}", "']}", __template))
-            __list = re.split("_(?={)|(?<=})_", __template)
-            return __list
-
-        def __evaluate_filename_args(**kwargs) -> str:
-            """
-            Evaluate kwargs into a single filename string.
-            Kwargs must include a 'template' kwarg.
-            All elements within the f-string that must be evaluated should also be included within kwargs.
-            Template elements can only be evaluated two levels deep.
-            """
-
-            template = kwargs["template"]
-            eval_arg = []
-            for arg in kwarg_it(template):
-
-                try:
-                    (arg,) = eval(arg)
-                except NameError:
-                    pass
-                finally:
-                    eval_arg.append(str(arg))
-
-                if any(x in arg for x in {'{', '}'}):  # if brackets still exist, evaluate one level deeper
-                    eval_sub_arg = []
-                    for sub_arg in kwarg_it(arg):
-
-                        try:
-                            (sub_arg,) = eval(sub_arg)
-                        except NameError:
-                            pass
-                        finally:
-                            eval_sub_arg.append(str(sub_arg))
-
-                    arg = '_'.join(eval_sub_arg)
-                    eval_arg[-1] = arg
-
-            return '_'.join(eval_arg)
-
-        self.filename = __evaluate_filename_args(**self.filename_args)
-        logger.debug(f"filename derived: {self.filename}")
-
-    @property
-    def is_empty(self) -> bool:
-        if self.df.empty:
-            return True
-        else:
-            return False
-
-    @property
-    def rows(self):
-        return self.total_items
-
-
-class MatchDataFrame(WorkerDataFrame):
-    def __init__(self):
-        super(MatchDataFrame, self).__init__(df_type="matches")
-        self.columns = ("type", "time", "product_id", "side", "size", "price",)
-        self.df = pd.DataFrame(columns=self.columns)
-        self.filename = None
-
-    def process_item(self, item) -> None:
-        self.concat(item)  # Todo: add error checks/fixes in case item not same format as dataframe
-
-    def derive_df_filename(self) -> None:
-        try:
-            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
-            self.filename_args = {
-                "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
-                "exchange": self.exchange,
-                "filename_body": "{count}_order_matches",
-                "count": self.rows,
-                "all_symbols": short_str,
-                "timestamp": timestamp
-            }
-        except Exception as e:
-            logger.critical(e)
-            raise e
-        else:
-            super().derive_df_filename()
-
-
-class CandleDataFrame(WorkerDataFrame):
-    def __init__(self):
-        super(CandleDataFrame, self).__init__(df_type="candles")
-        self.columns = ("type", "candle", "product_id", "frequency", "open", "high", "low", "close", "volume")
-        self.df = pd.DataFrame(columns=self.columns)
-        self.freq = FREQUENCY
-
-        self.filename_body = "{count}_OHLC_{freq}_candles"
-        self.filename_body_args = {
-            "count": self.rows,
-            "freq": self.freq
-        }
-        # temp variables to help with building current candle
-        self.last_candle = None
-        self.last_open = None
-        self.last_high = None
-        self.last_low = None
-        self.last_close = None
-        self.last_volume = None
-
-    def process_item(self, item) -> None:
-        # logger.debug(f"CandleDataFrame processing item:\n{item.to_string()}")
-        __candle = item["time"].dt.floor(freq=FREQUENCY)[0]  # floor time at chosen frequency
-        __product_id = item["product_id"][0]
-        __size = item["size"][0]
-        __price = item["price"][0]
-
-        if __candle != self.last_candle:  # if new candle, append last candle and reset vars for current candle
-            __tuple = (
-                "candles", self.last_candle, __product_id, self.freq, self.last_open,
-                self.last_high, self.last_low, self.last_close, self.last_volume
-            )
-            self.append_tuple(__tuple)
-            self.last_open = __price
-            self.last_high = __price
-            self.last_low = __price
-            self.last_close = __price
-            self.last_volume = __price
-        else:  # if same candle, continue building it up
-            self.last_high = max(self.last_high, __price)
-            self.last_low = min(self.last_low, __price)
-            self.last_close = __price
-            self.last_volume += __size
-
-        self.last_candle = __candle
-
-    def derive_df_filename(self) -> None:
-        try:
-            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
-            self.filename_args = {
-                "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
-                "exchange": self.exchange,
-                "filename_body": "{count}_{freq}_OHLC_candles",
-                "count": self.rows,
-                "freq": self.freq,
-                "all_symbols": short_str,
-                "timestamp": timestamp
-            }
-        except Exception as e:
-            logger.critical(e)
-            raise e
-        else:
-            super().derive_df_filename()
-
-
 class QueueWorker:
 
     def __init__(self, _queue: queue.Queue) -> None:
@@ -564,17 +334,8 @@ class QueueWorker:
         self.queue_stats["avg_qsize"] = self.queue_stats["avg_qsize"][-1000:]
 
     def initialize_dataframes(self) -> None:
-        worker_data_frame_dict = {
-            "matches": MatchDataFrame,
-            "candles": CandleDataFrame
-        }
-        for _channel in self.channels:
-            wdf = worker_data_frame_dict[_channel]()
-            self.worker_dataframes.append(wdf)
-
-        if self.build_candles:
-            wdf = worker_data_frame_dict["candles"]()
-            self.worker_dataframes.append(wdf)
+        self.worker_dataframes.append(MatchDataFrame(exchange="Coinbase", timestamp=timestamp))
+        self.worker_dataframes.append(CandleDataFrame(exchange="Coinbase", frequency=FREQUENCY, timestamp=timestamp))
 
     def save_dataframes(self, final: bool = False) -> None:
         os.makedirs('data', exist_ok=True)  # ensure 'data' output folder exists

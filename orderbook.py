@@ -2,8 +2,7 @@
 
 import time
 from itertools import islice
-import trace
-from collections import deque
+from datetime import datetime
 import copy
 from loguru import logger
 logger.remove()
@@ -29,7 +28,7 @@ class LimitOrderBook:
         self.__bid_levels = {}  # price : size
         self.__ask_levels = {}  # price : size
 
-        self.orders = {}  # order ids
+        self.orders = {}  # order ids : order (passed params)
 
         self.__timestamp = None
 
@@ -175,8 +174,11 @@ class LimitOrderBook:
         return bid_levels, ask_levels
 
     @property
-    def timestamp(self):
-        return copy.deepcopy(self.__timestamp)
+    def timestamp(self, datetime_format=False):
+        assert self.__timestamp is not None
+        if datetime_format:
+            return datetime.strptime(self.__timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+        return self.__timestamp
 
     def display_bid_tree(self):
         lines, *_ = _display_aux(self.bids)
@@ -875,7 +877,7 @@ class Order:
     Offers append() and pop() methods. Prepending isn't implemented."""
     __slots__ = ["uid", "is_bid", "size", "price", "timestamp", "next_item", "previous_item", "root"]
 
-    def __init__(self, uid, size, is_bid=None, price=None, root=None,
+    def __init__(self, uid, size=None, is_bid=None, price=None, root=None,
                  timestamp=None, next_item=None, previous_item=None):
         # Data values
         self.uid = uid

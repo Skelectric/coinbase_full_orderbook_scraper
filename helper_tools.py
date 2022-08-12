@@ -67,7 +67,8 @@ def url_fix(s, charset='UTF-8'):
     qs = parse.quote_plus(qs, ':&=')
     return parse.urlunsplit((scheme, netloc, path, qs, anchor))
 
-def s_print(s_print_lock: Lock, *a, **b):
+def s_print(*a, **b):
     """Thread-safe print function."""
+    s_print_lock = Lock()
     with s_print_lock:
         print(*a, **b)
