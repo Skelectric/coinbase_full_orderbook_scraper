@@ -18,6 +18,7 @@ class DepthChartPlotter:
 
         self.display_lim = 0.01  # display % below best bid and % above best ask
         self.outlier_pct = 0.01  # remove outliers % below best bid and % above best ask
+        self.move_price_pct = 0.005  # will calculate how much $ to move price by this amount
 
         self.timestamp = None
         self.sequence = None
@@ -30,7 +31,7 @@ class DepthChartPlotter:
     def plot(self):
         # logger.debug(f"Plotting data #{self.item_num}")
         if not self.queue.empty():
-            bid_prices, bid_depth, ask_prices, ask_depth = self.get_data()
+            bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = self.get_data()
 
             if self.ax.lines:  # clear previously drawn lines
                 self.ax.cla()
@@ -61,18 +62,44 @@ class DepthChartPlotter:
             self.ax.set_xlim(left=x_min, right=x_max)
             self.ax.spines['bottom'].set_position('zero')
 
-            # vars that require both bids and asks not to be None
+            # operations that require both bids and asks not to be None
             if best_bid is None or best_ask is None:
-                bid_ask_spread_txt = f"bid-ask LOADING..."
-                max_bid_ask_depth_txt = f"max bid depth LOADING... max ask depth LOADING..."
+                bid_ask_txt = f"bid/ask LOADING..."
+                mid_spread_txt = f"mid/spread LOADING..."
                 worst_bid_ask_txt = f"lowest bid LOADING... highest ask LOADING..."
-                orders_displayed_txt = f"bid level count LOADING ask level count LOADING"
+                ask_liquidity_txt = f"Ask liquidity LOADING..."
+                bid_liquidity_txt = f"Bid liquidity LOADING..."
+
             else:
+
                 bid_ask_spread = best_ask - best_bid
-                bid_ask_spread_txt = f"bid-ask {best_bid:.3f}, {best_ask:.3f}, {bid_ask_spread:.3f}"
-                max_bid_ask_depth_txt = f"max bid depth {max_bid_depth:.2f} max ask depth {max_ask_depth:.2f}"
+                mid = (best_ask + best_bid) / 2
+
+                # calculate liquidity
+                price_moved_up = mid * (1 + self.move_price_pct)
+                ask_liq_index = np.searchsorted(ask_prices, price_moved_up, side='left')
+                try:
+                    ask_liq = ask_liquidity[ask_liq_index]
+                except IndexError:
+                    ask_liq = ask_liquidity[ask_liq_index-1]
+
+                price_moved_down = mid * (1 - self.move_price_pct)
+                bid_liq_index = np.searchsorted(bid_prices, price_moved_down, side='right')
+                try:
+                    bid_liq = bid_liquidity[bid_liq_index]
+                except IndexError:
+                    bid_liq = bid_liquidity[bid_liq_index-1]
+
+                bid_ask_txt = f"bid/ask/spread/mid {best_bid:,.3f} / {best_ask:,.3f}"
+                mid_spread_txt = f"mid/spread {mid:.3f} / {bid_ask_spread:.3f}"
                 worst_bid_ask_txt = f"worst bid {worst_bid:.3f}... worst ask {worst_ask:.3f}."
+                ask_liquidity_txt = f"Amount to move price up {self.move_price_pct:.2%} "
+                ask_liquidity_txt += f"to {price_moved_up:,.2f}: ${ask_liq:,.2f}"
+                bid_liquidity_txt = f"Amount to move price down {self.move_price_pct:.2%} "
+                bid_liquidity_txt += f"to {price_moved_down:,.2f}: ${bid_liq:,.2f}"
+
                 y_max = max(max_bid_depth, max_ask_depth) * 1.1
+
                 self.ax.legend(loc='upper right')  # placed here to prevent "No artist" error msg from printing
 
             self.ax.set_ylim(top=y_max)
@@ -84,15 +111,19 @@ class DepthChartPlotter:
                 f"discarding bottom/top {self.outlier_pct:.1%} of bid/ask levels.",
                 f"displaying orderbook within {self.display_lim:.1%} of best bid/ask.",
                 f"worst bid/ask after discard: {worst_bid_ask_txt}",
-                f"{self.unique_traders} unique traders",
-                max_bid_ask_depth_txt,
-                bid_ask_spread_txt,
+                f"{self.unique_traders} unique client ids",
+                bid_ask_txt,
+                mid_spread_txt,
+                ask_liquidity_txt,
+                bid_liquidity_txt
             )
 
             self.fill_misc_text(display_text, x=0.005, y=0.98, d=-0.03)
 
             self.fig.canvas.flush_events()  # Todo: read more about what this does
             self.fig.canvas.draw()
+
+            self.queue.task_done()
 
         else:
             # logger.debug(f"Plotting queue is empty. Sleeping for 2 second.")
@@ -119,13 +150,12 @@ class DepthChartPlotter:
             data.get("timestamp"), data.get("sequence"), data.get("unique_traders"), \
             data.get("bid_levels"), data.get("ask_levels")
 
-        self.queue.task_done()
-
         return self.transform_data(bid_levels, ask_levels, self.outlier_pct)
 
     @staticmethod
     def transform_data(bid_levels, ask_levels, outlier_pct) -> tuple:
         bid_prices, bid_depth, ask_prices, ask_depth = None, None, None, None
+        bid_liquidity, ask_liquidity = None, None
 
         if bid_levels != {}:
             # get bid_levels and ask_levels, place into numpy arrays, and sort
@@ -145,6 +175,7 @@ class DepthChartPlotter:
                 bid_depth_zip.sort()
                 bid_prices = np.vectorize(lambda x: x[0])(bid_depth_zip)
                 bid_depth = np.vectorize(lambda x: x[1])(bid_depth_zip)
+                bid_liquidity = np.multiply(bid_prices, bid_depth)
 
         if ask_levels != {}:  # repeat for asks
             asks = np.fromiter(ask_levels.items(), dtype="f,f")
@@ -155,5 +186,6 @@ class DepthChartPlotter:
                 ask_prices = np.vectorize(lambda x: x[0])(asks)
                 ask_sizes = np.vectorize(lambda x: x[1])(asks)
                 ask_depth = np.cumsum(ask_sizes)
+                ask_liquidity = np.multiply(ask_prices, ask_depth)
 
-        return bid_prices, bid_depth, ask_prices, ask_depth
+        return bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity

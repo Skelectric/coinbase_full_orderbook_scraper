@@ -42,7 +42,7 @@ class WorkerDataFrame:
         """Save dataframe chunk using append."""
 
         if self.is_empty:  # filename can't be derived if dataframe is empty
-            # logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")
+            logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")
             return
 
         file_exists = Path(f"data/{self.filename}").is_file()
@@ -51,7 +51,7 @@ class WorkerDataFrame:
             # logger.debug(f"data/{self.filename} exists: {file_exists}")
 
             if not file_exists:
-                # logger.debug(f"{self.filename} doesn't exist. Creating new one...")
+                logger.debug(f"{self.filename} doesn't exist. Creating new one...")
                 header = True
                 self.derive_df_filename()
             else:
@@ -67,7 +67,7 @@ class WorkerDataFrame:
         if csv:
 
             if Path(f"data/{self.filename}").suffix != '.csv':  # append extension if doesn't exist
-                self.filename = self.filename + ".csv"
+                self.filename += ".csv"
 
             if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
                 # logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
@@ -79,7 +79,7 @@ class WorkerDataFrame:
         if hdf:
 
             if Path(f"data/{self.filename}").suffix != '.hdf':  # append extension if doesn't exist
-                self.filename = self.filename + ".hdf"
+                self.filename += ".hdf"
 
             if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
                 # logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
@@ -91,9 +91,10 @@ class WorkerDataFrame:
     def update_filename(self, extension: str) -> None:
         prev_filename = self.filename
         self.derive_df_filename()
-        self.filename = self.filename + extension
-        os.rename(f"data/{prev_filename}", f"data/{self.filename})")
-        # logger.debug(f"Renamed file from {prev_filename} to {self.filename}...")
+        self.filename += extension
+        os.rename(f"data/{prev_filename}", f"data/{self.filename}")
+        logger.info(f"Renamed file from {prev_filename} to {self.filename}...")
+        # assert Path(f"data/{self.filename}").is_file()
 
     def derive_df_filename(self) -> None:
 
@@ -248,26 +249,31 @@ class CandleDataFrame(WorkerDataFrame):
         return df
 
     def process_item(self, item) -> None:
-        # logger.debug(f"CandleDataFrame processing item:\n{item.to_string()}")
-
-        item = self.convert_to_df(item)  # convert from dict into df to leverage pandas dt.floor
-
+        item = self.convert_to_df(item)  # convert from dict into df to leverage pandas dt.floor method
         __candle = item["time"].dt.floor(freq=self.freq)[0]  # floor time at chosen frequency
         __product_id = item["product_id"][0]
-        __size = item["size"][0]
-        __price = item["price"][0]
+        __size = float(item["size"][0])
+        __price = float(item["price"][0])
 
-        if __candle != self.last_candle:  # if new candle, append last candle and reset vars for current candle
+        if self.last_candle is None:
+            self.last_open = __price
+            self.last_high = __price
+            self.last_low = __price
+            self.last_close = __price
+            self.last_volume = __size
+        elif __candle != self.last_candle:
+            # if new candle, append candle vars to df and reset vars for new candle
             __tuple = (
                 "candles", self.last_candle, __product_id, self.freq, self.last_open,
-                self.last_high, self.last_low, self.last_close, self.last_volume
+                self.last_high, self.last_low, self.last_close, round(self.last_volume, 6)
             )
+            # logger.debug(f"appending tuple to candles df: {__tuple}")
             self.append_tuple(__tuple)
             self.last_open = __price
             self.last_high = __price
             self.last_low = __price
             self.last_close = __price
-            self.last_volume = __price
+            self.last_volume = __size
         else:  # if same candle, continue building it up
             self.last_high = max(self.last_high, __price)
             self.last_low = min(self.last_low, __price)

@@ -28,9 +28,14 @@ class LimitOrderBook:
         self.__bid_levels = {}  # price : size
         self.__ask_levels = {}  # price : size
 
-        self.orders = {}  # order ids : order (passed params)
+        self.order_dict = {}  # order ids : order
 
         self.__timestamp = None
+
+        self.error_msgs = set()
+
+        # stats
+        self.items_processed = 0
 
     @property
     def empty(self) -> bool:
@@ -59,12 +64,13 @@ class LimitOrderBook:
         if action == "remove":
             popped_order = self.remove(order)
             return popped_order
-        elif action == "change:":
-            self.update(order)
+        elif action == "change":
+            self.change(order)
         elif action == "add":
             self.add(order)
         else:
             raise Exception("Unhandled order action")
+        self.items_processed += 1
 
     def get_limit_level(self, order):
         """Get limit_level corresponding to order's price."""
@@ -74,12 +80,18 @@ class LimitOrderBook:
             limit_level = self.asks.find_node(order)
         return limit_level
 
-    def update(self, order):
+    def change(self, order):
         """Updates an existing order in the book.
         It also updates the order's related LimitLevel's size, accordingly."""
-        size_diff = self.orders[order.uid].size - order.size
-        self.orders[order.uid].size = order.size
-        self.orders[order.uid].parent_limit.size -= size_diff
+        size_diff = self.order_dict[order.uid].size - order.size
+        self.order_dict[order.uid].size = order.size
+        self.order_dict[order.uid].parent_limit.size -= size_diff
+
+        # change size of price level
+        if order.is_bid:
+            self.__bid_levels[self.order_dict[order.uid].price] -= size_diff
+        else:
+            self.__ask_levels[self.order_dict[order.uid].price] -= size_diff
 
     def remove(self, order):
         """Removes an order from the book.
@@ -90,7 +102,7 @@ class LimitOrderBook:
 
         # Remove Order from self.orders
         try:
-            popped_order = self.orders.pop(order.uid)
+            popped_order = self.order_dict.pop(order.uid)
         except KeyError:
             # logger.info("Closed order id was not found in orders dict.")
             return None
@@ -127,7 +139,7 @@ class LimitOrderBook:
 
     def add(self, order):
         """Inserts order into AVL tree and updates best bid and best ask."""
-        self.orders[order.uid] = order
+        self.order_dict[order.uid] = order
         self.__timestamp = order.timestamp
 
         # insert order into tree and update bid_levels/ask_levels
@@ -155,11 +167,11 @@ class LimitOrderBook:
             bids = []
             asks = []
 
-            if self.best_bid is not None:
+            if self.__bid_levels != {}:
                 bids = list(islice(self.__bid_levels.keys(), depth))
                 bids.sort(reverse=True)
 
-            if self.best_ask is not None:
+            if self.__ask_levels != {}:
                 asks = list(islice(self.__ask_levels.keys(), depth))
                 asks.sort()
 
@@ -181,33 +193,60 @@ class LimitOrderBook:
         return self.__timestamp
 
     def display_bid_tree(self):
-        lines, *_ = _display_aux(self.bids)
-        # logger.info("")
-        # logger.info(f"Bids AVL Tree (size: {len(self.bids)})")
-        for line in lines:
-            logger.info(line)
-        # logger.info("")
+        logger.info(f"Bids AVL Tree (size: {len(self.bids)})")
+        self.bids.display_tree()
 
     def display_ask_tree(self):
-        lines, *_ = _display_aux(self.asks)
-        # logger.info("")
-        # logger.info(f"Asks AVL Tree (size: {len(self.asks)})")
-        for line in lines:
-            logger.info(line)
-        # logger.info("")
+        logger.info(f"Asks AVL Tree (size: {len(self.asks)})")
+        self.asks.display_tree()
 
-    def check(self):
+    def check(self, raise_errors=False):
+
         # Check for consistency with AVL trees
-        assert len(self.bids) == len(self.levels[0])
-        assert len(self.asks) == len(self.levels[1])
+        # logger.debug(f"Checking levels against AVL trees...")
+        levels = self.levels
+        if raise_errors:
+            assert len(self.bids) == len(levels[0])
+            assert len(self.asks) == len(levels[1])
+        else:
+            bid_tree_size, ask_tree_size = len(self.bids), len(self.asks)
+            bid_levels_size, ask_levels_size = len(levels[0]), len(levels[1])
+            # logger.debug(f"bid tree size = {bid_tree_size}, bid_levels_size = {bid_levels_size}, {'OK.' if bid_levels_size==bid_tree_size else 'Mismatch!'}")
+            # logger.debug(f"ask tree size = {ask_tree_size}, ask_levels_size = {ask_levels_size}, {'OK.' if ask_levels_size == ask_tree_size else 'Mismatch!'}")
 
         # Check that all pointers within AVL trees are correct
-        self.bids.check_pointer_validity()
-        self.asks.check_pointer_validity()
+        # logger.debug(f"Checking pointer validity...")
+        self.bids.check_pointer_validity(raise_errors=raise_errors, msg_container=self.error_msgs)
+        self.asks.check_pointer_validity(raise_errors=raise_errors, msg_container=self.error_msgs)
 
         # Check that trees were balanced successfully
-        assert self.bids.is_balanced is True
-        assert self.asks.is_balanced is True
+        if raise_errors:
+            assert self.bids.is_balanced is True
+            assert self.asks.is_balanced is True
+        else:
+            if self.bids.is_balanced is False:
+                self.error_msgs.add(f"Bids are not balanced!")
+            if self.asks.is_balanced is False:
+                self.error_msgs.add(f"Asks are not balanced!")
+
+        if self.error_msgs != set():
+            logger.warning('Errors found:')
+            logger.info(self.error_msgs)
+
+    def log_details(self):
+        if self.error_msgs is not set():
+            logger.info(f"No errors encountered.")
+        else:
+            logger.warning(f"******Errors encountered******")
+            for msg in self.error_msgs:
+                logger.info(msg)
+            logger.info('-------------------------------')
+
+        logger.info(f"{len(self.__bid_levels)} bid levels = {self.__bid_levels}:")
+        self.display_bid_tree()
+        logger.info(f"{len(self.__ask_levels)} ask levels = {self.__ask_levels}:")
+        self.display_ask_tree()
+        logger.info(f"Items processed: {self.items_processed:,}")
 
 
 class LimitLevel:
@@ -248,7 +287,8 @@ class LimitLevel:
         return node
 
     def display_tree(self):
-        display_tree(self.get_root)
+        root = self.get_root
+        root.display_tree()
 
     @property
     def volume(self) -> float:
@@ -314,6 +354,7 @@ class LimitLevel:
 
     def append(self, order):
         """Wrapper function to make appending to Order List simpler."""
+        # logger.debug(f"Appending order to node {self.price}: {order}")
         return self.orders.append(order)
 
     def _replace_node_in_parent(self, new_value=None):
@@ -470,32 +511,66 @@ class LimitLevel:
                 # logger.debug(f"Grandpa is not root, checking balance...")
                 self.grandpa.balance()
 
-    def check_pointer_validity(self):
+    def check_pointer_validity(self, raise_errors=False, msg_container: set = None) -> None | set:
         """Check that pointers are valid on all descendant nodes."""
-
         if self.left_child is not None:
 
             # check price validity
             msg = f"self.price = {self.price}, self.left_child.price = {self.left_child.price}"
-            assert self.left_child.price < self.price, msg
+            if raise_errors:
+                assert self.left_child.price < self.price, msg
+            else:
+                if self.left_child.price >= self.price:
+                    msg = "Invalid branching found: " + msg
+                    if msg_container is not None:
+                        msg_container.add(msg)
+                    else:
+                        logger.warning(msg)
 
             # check parent validity
             msg = f"self.price = {self.price}, self.left_child.parent.price = {self.left_child.parent.price}"
-            assert self.price == self.left_child.parent.price, msg
+            if raise_errors:
+                assert self.price == self.left_child.parent.price, msg
+            else:
+                if self.price != self.left_child.parent.price:
+                    msg = "Invalid parent/child references found: " + msg
+                    if msg_container is not None:
+                        msg_container.add(msg)
+                    else:
+                        logger.warning(msg)
 
-            self.left_child.check_pointer_validity()
+            self.left_child.check_pointer_validity(raise_errors=raise_errors, msg_container=msg_container)
 
         if self.right_child is not None:
 
             # check price validity
             msg = f"self.price = {self.price}, self.right_child.price = {self.right_child.price}"
-            assert self.right_child.price > self.price, msg
+            if raise_errors:
+                assert self.right_child.price > self.price, msg
+            else:
+                if self.right_child.price <= self.price:
+                    msg = "Invalid branching found: " + msg
+                    if msg_container is not None:
+                        msg_container.add(msg)
+                    else:
+                        logger.warning(msg)
 
             # check parent validity
             msg = f"self.price = {self.price}, self.right_child.parent.price = {self.right_child.parent.price}"
-            assert self.price == self.right_child.parent.price, msg
+            if raise_errors:
+                assert self.price == self.right_child.parent.price, msg
+            else:
+                if self.price != self.right_child.parent.price:
+                    msg = "Invalid parent/child references found: " + msg
+                    if msg_container is not None:
+                        msg_container.add(msg)
+                    else:
+                        logger.warning(msg)
 
-            self.right_child.check_pointer_validity()
+            self.right_child.check_pointer_validity(raise_errors=raise_errors, msg_container=msg_container)
+
+        if msg_container is not None:
+            return msg_container
 
     def balance(self):
         """Call the rotation method relevant to this Node's balance factor.
@@ -792,18 +867,15 @@ class LimitLevelTree:
             else:
                 return current_node
 
-    def check_pointer_validity(self):
+    def check_pointer_validity(self, *args, **kwargs):
         if self.right_child is not None:
-            self.right_child.check_pointer_validity()
+            self.right_child.check_pointer_validity(*args, **kwargs)
 
     @property
     def is_balanced(self):
         if self.right_child is not None:
             return self.right_child.is_balanced
         return True
-
-    def display_tree(self):
-        display_tree(self)
 
     def __len__(self):
         """Size of tree"""
@@ -837,6 +909,60 @@ class LimitLevelTree:
 
         return s
 
+    def display_tree(self):
+        lines, *_ = self._display_aux(self)
+        for line in lines:
+            logger.info(line)
+            pass
+
+    def _display_aux(self, node):
+        """Returns list of strings, width, height, and horizontal coordinate of the root."""
+        # debugging
+        # logger.debug(f"{node}")
+
+        # No child
+        if node.right_child is None and node.left_child is None:
+            line = f"{node.price}x{round(node.size)}"
+            width = len(line)
+            height = 1
+            middle = width // 2
+            return [line], width, height, middle
+
+        # Only left child.
+        if node.right_child is None:
+            lines, n, p, x = self._display_aux(node.left_child)
+            s = f"{node.price}x{round(node.size)}"
+            u = len(s)
+            first_line = (x + 1) * ' ' + (n - x - 1) * '_' + s
+            second_line = x * ' ' + '/' + (n - x - 1 + u) * ' '
+            shifted_lines = [line + u * ' ' for line in lines]
+            return [first_line, second_line] + shifted_lines, n + u, p + 2, n + u // 2
+
+        # Only right child.
+        if node.left_child is None:
+            lines, n, p, x = self._display_aux(node.right_child)
+            s = f"{node.price}x{round(node.size)}"
+            u = len(s)
+            first_line = s + x * '_' + (n - x) * ' '
+            second_line = (u + x) * ' ' + '\\' + (n - x - 1) * ' '
+            shifted_lines = [u * ' ' + line for line in lines]
+            return [first_line, second_line] + shifted_lines, n + u, p + 2, u // 2
+
+        # Two children.
+        left, n, p, x = self._display_aux(node.left_child)
+        right, m, q, y = self._display_aux(node.right_child)
+        s = f"{node.price}x{round(node.size)}"
+        u = len(s)
+        first_line = (x + 1) * ' ' + (n - x - 1) * '_' + s + y * '_' + (m - y) * ' '
+        second_line = x * ' ' + '/' + (n - x - 1 + u + y) * ' ' + '\\' + (m - y - 1) * ' '
+        if p < q:
+            left += [n * ' '] * (q - p)
+        elif q < p:
+            right += [m * ' '] * (p - q)
+        zipped_lines = zip(left, right)
+        lines = [first_line, second_line] + [a + u * ' ' + b for a, b in zipped_lines]
+        return lines, n + m + u, max(p, q) + 2, n + u // 2
+
 
 class OrderList:
     """Doubly-Linked List Container Class.
@@ -844,12 +970,13 @@ class OrderList:
     Keeps a reference to its parent LimitLevel Instance.
     This container was added because it makes deleting the LimitLevels easier.
     Has no other functionality."""
-    __slots__ = ["head", "tail", "parent_limit", "count"]
+    __slots__ = ["head", "tail", "parent_limit", "size", "count"]
 
     def __init__(self, parent_limit):
         self.head = None
         self.tail = None
         self.count = 0
+        self.size = 0
         self.parent_limit = parent_limit
 
     def __len__(self):
@@ -866,6 +993,11 @@ class OrderList:
             self.count += 1
         else:
             self.tail.append(order)
+
+    def __str__(self):
+        string = f"OrderList (self.head={self.head}\nself.tail={self.tail}\n"
+        string += f"self.count={self.count}, self.parent_limit={self.parent_limit}"
+        return string
 
 
 class Order:
@@ -941,69 +1073,22 @@ class Order:
                 "bid" if self.is_bid else "ask",
                 f"Price: {self.price}",
                 f"Size: {self.size}",
-                self.timestamp
+                self.timestamp,
+                f"Next Order: {self.next_item.uid if self.next_item is not None else None}",
+                f"Previous Order: {self.previous_item.uid if self.previous_item is not None else None}",
+                f"Inserted into OrderList = {True if self.root is not None else False}"
             )
         )
 
     def __repr__(self):
-        return str((self.uid, self.is_bid, self.price, self.size, self.timestamp))
-
-
-def display_tree(tree: LimitLevelTree):
-    # print()
-    lines, *_ = _display_aux(tree)
-    # logger.debug(f"AVL Tree (size: {len(tree)})")
-    for line in lines:
-        # logger.debug(line)
-        pass
-    # print()
-
-
-def _display_aux(node):
-    """Returns list of strings, width, height, and horizontal coordinate of the root."""
-
-    # debugging
-    # logger.debug(f"{node}")
-
-    # No child
-    if node.right_child is None and node.left_child is None:
-        line = f"{node.price}x{round(node.size)}"
-        width = len(line)
-        height = 1
-        middle = width // 2
-        return [line], width, height, middle
-
-    # Only left child.
-    if node.right_child is None:
-        lines, n, p, x = _display_aux(node.left_child)
-        s = f"{node.price}x{round(node.size)}"
-        u = len(s)
-        first_line = (x + 1) * ' ' + (n - x - 1) * '_' + s
-        second_line = x * ' ' + '/' + (n - x - 1 + u) * ' '
-        shifted_lines = [line + u * ' ' for line in lines]
-        return [first_line, second_line] + shifted_lines, n + u, p + 2, n + u // 2
-
-    # Only right child.
-    if node.left_child is None:
-        lines, n, p, x = _display_aux(node.right_child)
-        s = f"{node.price}x{round(node.size)}"
-        u = len(s)
-        first_line = s + x * '_' + (n - x) * ' '
-        second_line = (u + x) * ' ' + '\\' + (n - x - 1) * ' '
-        shifted_lines = [u * ' ' + line for line in lines]
-        return [first_line, second_line] + shifted_lines, n + u, p + 2, u // 2
-
-    # Two children.
-    left, n, p, x = _display_aux(node.left_child)
-    right, m, q, y = _display_aux(node.right_child)
-    s = f"{node.price}x{round(node.size)}"
-    u = len(s)
-    first_line = (x + 1) * ' ' + (n - x - 1) * '_' + s + y * '_' + (m - y) * ' '
-    second_line = x * ' ' + '/' + (n - x - 1 + u + y) * ' ' + '\\' + (m - y - 1) * ' '
-    if p < q:
-        left += [n * ' '] * (q - p)
-    elif q < p:
-        right += [m * ' '] * (p - q)
-    zipped_lines = zip(left, right)
-    lines = [first_line, second_line] + [a + u * ' ' + b for a, b in zipped_lines]
-    return lines, n + m + u, max(p, q) + 2, n + u // 2
+        return str(
+            (
+                self.uid,
+                self.is_bid,
+                self.price,
+                self.size,
+                self.timestamp,
+                self.next_item.uid if self.next_item is not None else None,
+                self.previous_item.uid if self.previous_item is not None else None
+            )
+        )
