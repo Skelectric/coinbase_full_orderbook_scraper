@@ -2,19 +2,53 @@ import queue
 
 import numpy as np
 from loguru import logger
+from helper_tools import Timer
+import threading
+import ctypes
+import easygui
+
+import matplotlib
 from matplotlib import pyplot as plt
+from matplotlib.backend_bases import NavigationToolbar2, Event
+matplotlib.use('TkAgg')
+
+home = NavigationToolbar2.home
+
+
+def new_home(self, *args):
+    """Make pressing the home button a callable event"""
+    s = 'home_event'
+    event = Event(s, self)
+    self.canvas.callbacks.process(s, event)
+    home(self, *args)
+
+
+NavigationToolbar2.home = new_home
+
+# windows only
+# def ReopenDepthChart(title, text, style):
+#     return ctypes.windll.user32.MessageBoxW(0, text, title, style)
+
+
+def ReopenDepthChart():
+    return easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
 
 
 class DepthChartPlotter:
     # Todo: Build multi-orderbook support
-    def __init__(self, title=None, max_queue_size=1):
+    def __init__(self, title=None, queue=queue):
         self.title = title
-        self.queue = queue.Queue(maxsize=max_queue_size)
+        self.queue = queue
         plt.ion()
         plt.style.use('dark_background')
         # self.fig, self.ax = plt.subplots(sharex=True, sharey=True)
         self.fig = plt.figure(figsize=(9, 6))
         self.ax = self.fig.add_subplot()
+
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
+        self.fig.canvas.mpl_connect('button_press_event', self.on_click)
+        self.fig.canvas.mpl_connect('button_release_event', self.on_release)
+        self.fig.canvas.mpl_connect('home_event', self.on_home)
 
         self.display_lim = 0.01  # display % below best bid and % above best ask
         self.outlier_pct = 0.01  # remove outliers % below best bid and % above best ask
@@ -24,13 +58,38 @@ class DepthChartPlotter:
         self.sequence = None
         self.unique_traders = None
 
-        # self.skip_item_freq = 50
+        self.__timer = Timer()
+        self.__timer.start()
+
+        self.paused = False
+        self.closed = False
+        self.xlim = None
+        self.ylim = None
 
         logger.debug("DepthChartPlotter initialized.")
 
+    def on_close(self, event):
+        # logger.debug(f"Figure closed.")
+        self.closed = True
+        return None
+
+    def on_click(self, event):
+        # logger.debug(f"Mouse clicked. Setting self.pause to True")
+        self.paused = True
+
+    def on_release(self, event):
+        self.paused = False
+        # logger.debug(f"Mouse click released. Setting self.pause to False")
+        self.xlim = self.ax.get_xlim()
+        self.ylim = self.ax.get_ylim()
+
+    def on_home(self, event):
+        self.xlim, self.ylim = None, None
+        # logger.debug(f"xlim, ylim reset.")
+
     def plot(self):
         # logger.debug(f"Plotting data #{self.item_num}")
-        if not self.queue.empty():
+        if not self.queue.empty() and not self.paused:
             bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = self.get_data()
 
             if self.ax.lines:  # clear previously drawn lines
@@ -58,9 +117,6 @@ class DepthChartPlotter:
                 self.ax.step(ask_prices, ask_depth, color="red", label="asks")
                 plt.fill_between(ask_prices, ask_depth, facecolor="red", step='pre', alpha=0.2)
                 max_ask_depth = max(ask_depth)
-
-            self.ax.set_xlim(left=x_min, right=x_max)
-            self.ax.spines['bottom'].set_position('zero')
 
             # operations that require both bids and asks not to be None
             if best_bid is None or best_ask is None:
@@ -102,32 +158,52 @@ class DepthChartPlotter:
 
                 self.ax.legend(loc='upper right')  # placed here to prevent "No artist" error msg from printing
 
-            self.ax.set_ylim(top=y_max)
+            self.ax.spines['bottom'].set_position('zero')
+
+            # restore xlim, ylims set through zooming
+            if self.xlim is None:
+                self.ax.set_xlim(left=x_min, right=x_max)
+            else:
+                self.ax.set_xlim(self.xlim)
+
+            if self.ylim is None:
+                self.ax.set_ylim(bottom=0, top=y_max)
+            else:
+                self.ax.set_ylim(self.ylim)
 
             self.fig.suptitle(f"Market Depth - {self.title}")
             self.ax.set_title(f"latest timestamp: {self.timestamp}")
 
-            display_text = (
+            display_text_upper_left = (
                 f"discarding bottom/top {self.outlier_pct:.1%} of bid/ask levels.",
-                f"displaying orderbook within {self.display_lim:.1%} of best bid/ask.",
                 f"worst bid/ask after discard: {worst_bid_ask_txt}",
                 f"{self.unique_traders} unique client ids",
                 bid_ask_txt,
                 mid_spread_txt,
                 ask_liquidity_txt,
-                bid_liquidity_txt
+                bid_liquidity_txt,
+                f"draw-time = {self.__timer.lap():.4f} sec"
             )
 
-            self.fill_misc_text(display_text, x=0.005, y=0.98, d=-0.03)
+            threads = [thread.name for thread in threading.enumerate()]
+            display_text_lower_left = (
+                "Threads:",
+                *threads
+            )
 
-            self.fig.canvas.flush_events()  # Todo: read more about what this does
+            self.fill_misc_text(display_text_upper_left, x=0.005, y=0.98, d=-0.03)
+            self.fill_misc_text(display_text_lower_left, x=0.005, y=0.25, d=-0.03)
+
             self.fig.canvas.draw()
+
+            self.fig.canvas.flush_events()
 
             self.queue.task_done()
 
         else:
-            # logger.debug(f"Plotting queue is empty. Sleeping for 2 second.")
-            # plt.pause(0.1)
+            # logger.debug(f"Plotting queue is empty or self.pause=True.")
+            # time.sleep(1)
+            plt.pause(0.1)
             pass
 
     def fill_misc_text(self, display_text, x, y, d):
@@ -139,10 +215,6 @@ class DepthChartPlotter:
             )
 
     def get_data(self):
-
-        # skip processing items when qsize too large
-        # while self.queue.qsize() > self.skip_item_freq:
-        #     _ = self.queue.get()
 
         data = self.queue.get()
         self.timestamp, self.sequence, self.unique_traders, \

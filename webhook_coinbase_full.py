@@ -17,17 +17,16 @@ import itertools
 from collections import defaultdict
 from pathlib import Path
 
+import trace
+
 import pandas as pd
 pd.options.display.float_format = '{:.6f}'.format
-
-import matplotlib
-matplotlib.use('TkAgg')
 
 # homebrew modules
 from api_coinbase import CoinbaseAPI
 from orderbook import LimitOrderBook, Order
 from GracefulKiller import GracefulKiller
-from depthchart import DepthChartPlotter
+from depthchart import DepthChartPlotter, ReopenDepthChart
 from helper_tools import Timer
 from worker_dataframes import MatchDataFrame, CandleDataFrame
 
@@ -48,7 +47,7 @@ ITEM_DISPLAY_FLAGS = {
     "change": False
 }
 
-BUILD_CANDLES = True
+BUILD_CANDLES = False
 
 PLOT_DEPTH_CHART = True
 
@@ -59,7 +58,7 @@ JSON_FILEPATH = "data/change_order_test.json"
 
 FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
-SAVE_CSV = True
+SAVE_CSV = False
 SAVE_HD5 = False  # Todo: Test this
 SAVE_INTERVAL = 360
 STORE_FEED_IN_MEMORY = False
@@ -88,6 +87,11 @@ logger.add(
     format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> --- <level>{level}</level> | Thread {thread} <level>{message}</level>"
 )
 
+tracer = trace.Trace(
+    ignoredirs=[sys.prefix, sys.exec_prefix],
+    trace=0,
+    count=1)
+
 # ======================================================================================
 
 s_lock = Lock()
@@ -107,7 +111,7 @@ class WebsocketClient:
         self.id = self.channel + '_' + self.market
         self.ws = None
         self.ws_url = ENDPOINT
-        self.user = api.get_user
+        self.user = api.get_user()
         self.thread = None
         self.thread_id = None
         self.running = None
@@ -178,7 +182,6 @@ class WebsocketClient:
     def process_msg(self, msg: dict):
         self.data_queue.put(msg)
         return None
-        # todo
 
     def start_thread(self) -> None:
         logger.info(f"Starting websocket thread for {self.id}....")
@@ -289,7 +292,7 @@ class WebsocketClientHandler:
         return [x.id for x in self.websocket_clients]
 
 
-class QueueWorker:
+class OrderbookBuilder:
     """Build limit orderbook from msgs in queue"""
     def __init__(
             self, queue,
@@ -319,6 +322,7 @@ class QueueWorker:
         self.item_display_flags = {
             "subscriptions": True, "received": True, "open": True, "done": True, "match": True, "change": True
         }
+        
         if isinstance(item_display_flags, dict):
             for item_type in item_display_flags:
                 self.item_display_flags[item_type] = item_display_flags[item_type]
@@ -344,11 +348,10 @@ class QueueWorker:
 
         self.finish_up = False  # end flag
 
-        self.lob_checked = False
-        self.lob_check_count = 0
+        self.__lob_checked = False
+        self.__lob_check_count = 0
 
         self.thread = Thread(target=self.process_queue)
-        # self.thread.start()
 
         if self.load_feed_from_json:
             self.in_data = None
@@ -396,7 +399,7 @@ class QueueWorker:
                 wdf.clear()
 
     def save_orderbook_snapshot(self) -> None:
-        # Todo: make a custom JSON encoder for orderbooks
+        # Todo: build a custom JSON encoder for orderbook class
         last_timestamp = datetime.strftime(self.last_timestamp, "%Y%m%d-%H%M%S")
         json_filename = f"coinbase_{self.market}_orderbook_snapshot_{last_timestamp}.json"
         json_filepath = Path.cwd() / self.output_folder / json_filename
@@ -431,7 +434,7 @@ class QueueWorker:
 
                 finally:
                     self.queue.task_done()
-                    self.lob_checked = False
+                    self.__lob_checked = False
 
                 if (self.save_CSV or self.save_HD5) and self.save_timer.elapsed() > self.save_interval:
                     logger.info(f"Time elapsed: {module_timer.elapsed(hms_format=True)}")
@@ -454,24 +457,26 @@ class QueueWorker:
 
                     # run orderbook checks no more than once every queue_stats_interval
                     # todo: use a different interval
-                    if not self.lob_checked:
+                    if not self.__lob_checked:
                         logger.info(f"Checking orderbook validity...", end='')
                         self.lob.check()
-                        self.lob_checked = True
-                        self.lob_check_count += 1
+                        self.__lob_checked = True
+                        self.__lob_check_count += 1
 
-            # check on main thread -> wrap it up if main thread broke
-            if not threading.main_thread().is_alive() and not self.finish_up:
-                logger.critical("Main thread is dead! Wrapping it up...")
-                self.finish_up = True
+            finally:
 
-            if self.finish_up and self.queue.empty():
-                if self.save_CSV or self.save_HD5:
-                    self.save_dataframes(final=True)
-                    # self.save_orderbook_snapshot()
-                    self.log_summary()
-                logger.info("Queue worker has finished.")
-                break
+                # check on main thread -> wrap it up if main thread broke
+                if not threading.main_thread().is_alive() and not self.finish_up:
+                    logger.critical("Main thread is dead! Wrapping it up...")
+                    self.finish_up = True
+
+                if self.finish_up and self.queue.empty():
+                    if self.save_CSV or self.save_HD5:
+                        self.save_dataframes(final=True)
+                        # self.save_orderbook_snapshot()
+                        self.log_summary()
+                    logger.info("Queue worker has finished.")
+                    break
                 
     def log_summary(self):
         logger.info("________________________________ Summary ________________________________")
@@ -486,7 +491,7 @@ class QueueWorker:
             # source: https://stackoverflow.com/questions/3617170/average-timedelta-in-list
             average_timedelta = sum(self.queue_stats["delta"], timedelta(0)) / len(self.queue_stats["delta"])
             logger.info(f"Average webhook-processing delay = {average_timedelta}")
-            logger.info(f"LOB validity checks performed = {self.lob_check_count}")
+            logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
         logger.info(f"________________________________ Summary End ________________________________")
 
         # Todo: Add more
@@ -675,6 +680,7 @@ def main():
     Path('data').mkdir(parents=True, exist_ok=True)
 
     data_queue = queue.Queue()
+    depth_chart_queue = queue.Queue(maxsize=1)
 
     # enables authenticated channel subscription
     api = CoinbaseAPI()
@@ -690,11 +696,11 @@ def main():
 
         plotter = None
         if PLOT_DEPTH_CHART:
-            plotter = DepthChartPlotter(f"Coinbase - {MARKETS[0]}")
+            plotter = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
 
-        queue_worker = QueueWorker(
+        queue_worker = OrderbookBuilder(
             queue=data_queue,
-            output_queue=plotter.queue if plotter is not None else None,
+            output_queue=depth_chart_queue,
             save_csv=SAVE_CSV,
             save_hd5=SAVE_HD5,
             save_interval=SAVE_INTERVAL,
@@ -707,14 +713,26 @@ def main():
 
         queue_worker.thread.start()
 
+    reopen_prompt = True
+
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
 
         # run plotter
         if PLOT_DEPTH_CHART and not WEBHOOK_ONLY:
-            plotter.plot()
-        else:
-            time.sleep(1)
+
+            if not plotter.closed:
+                plotter.plot()
+
+            else:
+
+                if reopen_prompt:
+                    result = ReopenDepthChart()
+                    if result:
+                        plotter = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
+                        # time.sleep(3)
+                    else:
+                        reopen_prompt = False
 
         # send kill thread signal if queue worker breaks
         if not WEBHOOK_ONLY and not queue_worker.thread.is_alive():

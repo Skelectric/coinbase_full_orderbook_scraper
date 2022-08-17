@@ -83,8 +83,12 @@ class LimitOrderBook:
     def change(self, order):
         """Updates an existing order in the book.
         It also updates the order's related LimitLevel's size, accordingly."""
+        try:
+            self.order_dict[order.uid].size = order.size
+        except KeyError:
+            return None
+
         size_diff = self.order_dict[order.uid].size - order.size
-        self.order_dict[order.uid].size = order.size
         self.order_dict[order.uid].parent_limit.size -= size_diff
 
         # change size of price level
@@ -193,11 +197,11 @@ class LimitOrderBook:
         return self.__timestamp
 
     def display_bid_tree(self):
-        logger.info(f"Bids AVL Tree (size: {len(self.bids)})")
+        logger.info(f"Bids AVL Tree (size: {len(self.bids)}, height: {self.bids.height})")
         self.bids.display_tree()
 
     def display_ask_tree(self):
-        logger.info(f"Asks AVL Tree (size: {len(self.asks)})")
+        logger.info(f"Asks AVL Tree (size: {len(self.asks)}, height: {self.asks.height})")
         self.asks.display_tree()
 
     def check(self, raise_errors=False):
@@ -469,6 +473,8 @@ class LimitLevel:
                 successor.balance()
 
             # self.display_tree()
+
+
 
         elif self.left_child is not None:  # only left child
             # logger.debug(f"Removed node {self.price} only has left child. Attempting to point parent to left child...")
@@ -800,6 +806,11 @@ class LimitLevelTree:
         self.is_root = True
         self.price = 0
         self.size = 0
+
+    @property
+    def height(self):
+        if self.right_child is not None:
+            return self.right_child.height
 
     def insert(self, order):
         """Iterative AVL Insert method to insert a new order."""

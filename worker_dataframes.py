@@ -41,7 +41,7 @@ class WorkerDataFrame:
     def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename_flag: bool = False) -> None:
         """Save dataframe chunk using append."""
 
-        if self.is_empty:  # filename can't be derived if dataframe is empty
+        if self.total_items == 0:  # filename can't be derived if dataframe is empty
             logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")
             return
 
@@ -157,6 +157,7 @@ class MatchDataFrame(WorkerDataFrame):
     def __init__(self, exchange=None, timestamp=None):
         super(MatchDataFrame, self).__init__(df_type="matches")
         self.exchange = exchange
+        self.short_str = None
         self.columns = (
             "type", "time", "product_id", "side", "size", "price", "trade_id", "maker_order_id", "taker_order_id"
         )
@@ -168,9 +169,10 @@ class MatchDataFrame(WorkerDataFrame):
         if display_match:
             self.display_match(item)
         item = self.convert_to_df(item)
-        self.concat(item)  # Todo: add error checks/fixes in case item not same format as dataframe
+        self.concat(item)
 
     def convert_to_df(self, item) -> pd.DataFrame():
+        """Converts passed item from dict to DataFrame"""
         item = {key: value for key, value in item.items() if key in self.columns}
         item["time"] = datetime.strptime(item.get('time'), "%Y-%m-%dT%H:%M:%S.%fZ")
         df = pd.DataFrame(columns=item.keys(), data=[item])
@@ -178,13 +180,14 @@ class MatchDataFrame(WorkerDataFrame):
 
     def derive_df_filename(self) -> None:
         try:
-            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
+            if self.short_str is None:
+                self.short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
             self.filename_args = {
                 "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
                 "exchange": self.exchange,
                 "filename_body": "{count}_order_matches",
                 "count": self.rows,
-                "all_symbols": short_str,
+                "all_symbols": self.short_str,
                 "timestamp": self.timestamp
             }
         except Exception as e:
@@ -224,17 +227,13 @@ class CandleDataFrame(WorkerDataFrame):
     def __init__(self, exchange=None, frequency=None, timestamp=None):
         super(CandleDataFrame, self).__init__(df_type="candles")
         self.exchange = exchange
+        self.short_str = None
         self.columns = (
             "type", "candle", "product_id", "frequency", "open", "high", "low", "close", "volume"
         )
         self.df = pd.DataFrame(columns=self.columns)
         self.freq = frequency
         self.timestamp = timestamp if timestamp is not None else datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.filename_body = "{count}_OHLC_{freq}_candles"
-        self.filename_body_args = {
-            "count": self.rows,
-            "freq": self.freq
-        }
         # temp variables to help with building current candle
         self.last_candle = None
         self.last_open = None
@@ -255,7 +254,7 @@ class CandleDataFrame(WorkerDataFrame):
         __size = float(item["size"][0])
         __price = float(item["price"][0])
 
-        if self.last_candle is None:
+        if self.last_candle is None:  # first candle
             self.last_open = __price
             self.last_high = __price
             self.last_low = __price
@@ -284,14 +283,15 @@ class CandleDataFrame(WorkerDataFrame):
 
     def derive_df_filename(self) -> None:
         try:
-            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
+            if self.short_str is None:
+                self.short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
             self.filename_args = {
                 "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
                 "exchange": self.exchange,
                 "filename_body": "{count}_{freq}_OHLC_candles",
                 "count": self.rows,
                 "freq": self.freq,
-                "all_symbols": short_str,
+                "all_symbols": self.short_str,
                 "timestamp": self.timestamp
             }
         except Exception as e:
