@@ -272,7 +272,7 @@ class WebsocketClientHandler:
                 if websocket_client.running:
                     try:
                         websocket_client.ping("keepalive")
-                        logger.info(f"Pinged websocket for {websocket_client.market}.")
+                        logger.info(f"Pinged websocket for {websocket_client.__market}.")
                     except WebSocketConnectionClosedException:
                         pass
             time.sleep(interval)
@@ -281,7 +281,7 @@ class WebsocketClientHandler:
     @property
     def short_str_markets(self) -> str:
         # get market symbols and append into single string i.e. BTC,ETH,SOL
-        return ','.join([websocket.market[:websocket.market.find("-")] for websocket in self.websocket_clients])
+        return ','.join([websocket.__market[:websocket.__market.find("-")] for websocket in self.websocket_clients])
 
     @property
     def websockets_open(self) -> bool:

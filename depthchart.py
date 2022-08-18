@@ -1,4 +1,4 @@
-import queue
+from queue import Queue, Empty
 
 import numpy as np
 from loguru import logger
@@ -35,9 +35,9 @@ def ReopenDepthChart():
 
 class DepthChartPlotter:
     # Todo: Build multi-orderbook support
-    def __init__(self, title=None, queue=queue):
-        self.title = title
+    def __init__(self, queue: Queue, title=None, ):
         self.queue = queue
+        self.title = title
         plt.ion()
         plt.style.use('dark_background')
         # self.fig, self.ax = plt.subplots(sharex=True, sharey=True)
@@ -49,7 +49,10 @@ class DepthChartPlotter:
         self.fig.canvas.mpl_connect('button_release_event', self.on_release)
         self.fig.canvas.mpl_connect('home_event', self.on_home)
 
-        self.display_lim = 0.01  # display % below best bid and % above best ask
+        self.zoom_factory(axis=self.ax, depth_chart=True)
+
+        self.display_pct_default = (0.01, 0.01)
+        self.display_pct = list(self.display_pct_default)  # display % below best bid and % above best ask
         self.outlier_pct = 0.01  # remove outliers % below best bid and % above best ask
         self.move_price_pct = 0.005  # will calculate how much $ to move price by this amount
 
@@ -62,8 +65,9 @@ class DepthChartPlotter:
 
         self.paused = False
         self.closed = False
-        self.xlim = None
-        self.ylim = None
+
+        self.ax.xlim_prev = None
+        self.ax.ylim_prev = None
 
         logger.debug("DepthChartPlotter initialized.")
 
@@ -79,45 +83,40 @@ class DepthChartPlotter:
     def on_release(self, event):
         self.paused = False
         # logger.debug(f"Mouse click released. Setting self.pause to False")
-        self.xlim = self.ax.get_xlim()
-        self.ylim = self.ax.get_ylim()
+        self.ax.xlim_prev = self.ax.get_xlim()
+        self.ax.ylim_prev = self.ax.get_ylim()
 
     def on_home(self, event):
-        self.xlim, self.ylim = None, None
+        self.ax.xlim_prev, self.ax.ylim_prev = None, None
+        self.display_pct = list(self.display_pct_default)
+        self.fig.canvas.draw()
         # logger.debug(f"xlim, ylim reset.")
 
-    def plot(self):
-        # logger.debug(f"Plotting data #{self.item_num}")
+    def plot_depth_chart(self):
         if not self.queue.empty() and not self.paused:
-            bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = self.get_data()
 
             if self.ax.lines:  # clear previously drawn lines
                 self.ax.cla()
 
-            self.ax.set_xlabel('Price')
-            self.ax.set_ylabel('Quantity')
+            # get data and plot step functions
+            bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = self.get_data()
 
             best_bid, best_ask, worst_bid, worst_ask = None, None, None, None
-            max_bid_depth, max_ask_depth = None, None
-            x_min, x_max, y_max = None, None, None
 
             if bid_prices is not None:
                 best_bid = bid_prices[-1]
                 worst_bid = bid_prices[0]
-                x_min = max(best_bid * (1 - self.display_lim), worst_bid)
                 self.ax.step(bid_prices, bid_depth, color="green", label="bids")
                 plt.fill_between(bid_prices, bid_depth, facecolor="green", step='pre', alpha=0.2)
-                max_bid_depth = max(bid_depth)
 
             if ask_prices is not None:
                 best_ask = ask_prices[0]
                 worst_ask = ask_prices[-1]
-                x_max = min(best_ask * (1 + self.display_lim), worst_ask)
                 self.ax.step(ask_prices, ask_depth, color="red", label="asks")
                 plt.fill_between(ask_prices, ask_depth, facecolor="red", step='pre', alpha=0.2)
-                max_ask_depth = max(ask_depth)
 
-            # operations that require both bids and asks not to be None
+            # operations that require both bids and asks -------------------------------
+            # default text
             if best_bid is None or best_ask is None:
                 bid_ask_txt = f"bid/ask LOADING..."
                 mid_spread_txt = f"mid/spread LOADING..."
@@ -133,17 +132,11 @@ class DepthChartPlotter:
                 # calculate liquidity
                 price_moved_up = mid * (1 + self.move_price_pct)
                 ask_liq_index = np.searchsorted(ask_prices, price_moved_up, side='left')
-                try:
-                    ask_liq = ask_liquidity[ask_liq_index]
-                except IndexError:
-                    ask_liq = ask_liquidity[ask_liq_index-1]
+                ask_liq = ask_liquidity[ask_liq_index-1]
 
                 price_moved_down = mid * (1 - self.move_price_pct)
                 bid_liq_index = np.searchsorted(bid_prices, price_moved_down, side='right')
-                try:
-                    bid_liq = bid_liquidity[bid_liq_index]
-                except IndexError:
-                    bid_liq = bid_liquidity[bid_liq_index-1]
+                bid_liq = bid_liquidity[bid_liq_index-1]
 
                 bid_ask_txt = f"bid/ask/spread/mid {best_bid:,.3f} / {best_ask:,.3f}"
                 mid_spread_txt = f"mid/spread {mid:.3f} / {bid_ask_spread:.3f}"
@@ -153,30 +146,56 @@ class DepthChartPlotter:
                 bid_liquidity_txt = f"Amount to move price down {self.move_price_pct:.2%} "
                 bid_liquidity_txt += f"to {price_moved_down:,.2f}: ${bid_liq:,.2f}"
 
-                y_max = max(max_bid_depth, max_ask_depth) * 1.1
-
                 self.ax.legend(loc='upper right')  # placed here to prevent "No artist" error msg from printing
+
+            # calc xlim and ylim ------------------------------------------------------------
+
+            max_bid_depth_displayed, max_ask_depth_displayed = None, None
+            x_min, x_max, y_min, y_max = None, None, 0, None
+
+            # calc display boundaries
+            if best_bid is not None:
+                if self.ax.xlim_prev is None:
+                    x_min = max(best_bid * (1 - self.display_pct[0]), worst_bid)
+                else:
+                    x_min = self.ax.xlim_prev[0]
+                    self.display_pct[0] = (best_bid - x_min) / best_bid
+                x_min_index = np.searchsorted(bid_prices, x_min, side='right')
+                max_bid_depth_displayed = bid_depth[x_min_index - 1]
+
+            if best_ask is not None:
+                if self.ax.xlim_prev is None:
+                    x_max = min(best_ask * (1 + self.display_pct[1]), worst_ask)
+                else:
+                    x_max = self.ax.xlim_prev[1]
+                    self.display_pct[1] = (x_max - best_ask) / x_max
+                x_max_index = np.searchsorted(ask_prices, x_max, side='left')
+                max_ask_depth_displayed = ask_depth[x_max_index - 1]
+
+            if best_bid is not None and best_ask is not None:
+                if self.ax.ylim_prev is None:
+                    y_max = max(max_bid_depth_displayed, max_ask_depth_displayed) * 1.1
+                else:
+                    y_max = self.ax.ylim_prev[1]
+
+            # finalize xlim and ylim for current draw
+            self.ax.set_xlim(left=x_min, right=x_max)
+            self.ax.set_ylim(bottom=y_min, top=y_max)
+
+            # final text and formatting  -----------------------------------------------------------
 
             self.ax.spines['bottom'].set_position('zero')
 
-            # restore xlim, ylims set through zooming
-            if self.xlim is None:
-                self.ax.set_xlim(left=x_min, right=x_max)
-            else:
-                self.ax.set_xlim(self.xlim)
-
-            if self.ylim is None:
-                self.ax.set_ylim(bottom=0, top=y_max)
-            else:
-                self.ax.set_ylim(self.ylim)
+            self.ax.set_xlabel('Price')
+            self.ax.set_ylabel('Quantity')
 
             self.fig.suptitle(f"Market Depth - {self.title}")
             self.ax.set_title(f"latest timestamp: {self.timestamp}")
 
             display_text_upper_left = (
+                f"Displaying prices {self.display_pct[0]:.1%} below best bid and {self.display_pct[1]:.1%} above best ask.",
                 f"discarding bottom/top {self.outlier_pct:.1%} of bid/ask levels.",
                 f"worst bid/ask after discard: {worst_bid_ask_txt}",
-                f"{self.unique_traders} unique client ids",
                 bid_ask_txt,
                 mid_spread_txt,
                 ask_liquidity_txt,
@@ -192,6 +211,8 @@ class DepthChartPlotter:
 
             self.fill_misc_text(display_text_upper_left, x=0.005, y=0.98, d=-0.03)
             self.fill_misc_text(display_text_lower_left, x=0.005, y=0.25, d=-0.03)
+
+            # final draw events ----------------------------------------------------
 
             self.fig.canvas.draw()
 
@@ -260,3 +281,38 @@ class DepthChartPlotter:
                 ask_liquidity = np.multiply(ask_prices, ask_depth)
 
         return bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity
+
+    def zoom_factory(self, axis, base_scale=2e-1, depth_chart: bool = True):
+        """returns zooming functionality to axis.
+        https://gist.github.com/tacaswell/3144287"""
+
+        def zoom_func(event, ax, scale):
+            """zoom when scrolling"""
+            if event.inaxes == axis:
+                scale_factor = np.power(scale, -event.step)
+                xlim = ax.get_xlim()
+                ylim = ax.get_ylim()
+                xdata = event.xdata  # get event x location
+                ydata = event.ydata  # get event y location
+
+                # Get distance from the cursor to the edge of the figure frame
+                x_left = xdata - xlim[0]
+                x_right = xlim[1] - xdata
+                y_top = ydata - ylim[0]
+                y_bottom = ylim[1] - ydata
+
+                # set new limits
+                new_xlim = [xdata - x_left * scale_factor, xdata + x_right * scale_factor]
+                if depth_chart:
+                    new_ylim = [0, ydata + y_bottom * scale_factor]
+                else:
+                    new_ylim = [ydata - y_top * scale_factor, ydata + y_bottom * scale_factor]
+
+                ax.set_xlim(new_xlim)
+                ax.set_ylim(new_ylim)
+                ax.xlim_prev = new_xlim
+                ax.ylim_prev = new_ylim
+                ax.figure.canvas.draw()  # force redraw
+
+        fig = axis.get_figure()
+        fig.canvas.mpl_connect('scroll_event', lambda event: zoom_func(event, axis, 1 + base_scale))

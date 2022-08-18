@@ -11,8 +11,7 @@ from queue import Queue
 import sys
 import itertools
 from pathlib import Path
-
-import trace
+import time
 
 import pandas as pd
 pd.options.display.float_format = '{:.6f}'.format
@@ -20,7 +19,7 @@ pd.options.display.float_format = '{:.6f}'.format
 # homebrew modules
 from api_coinbase import CoinbaseAPI
 from api_coinbase_pro import CoinbaseProAPI
-from orderbook_builder import OrderbookBuilder
+from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
 from tools.GracefulKiller import GracefulKiller
 from depthchart import DepthChartPlotter, ReopenDepthChart
 from tools.helper_tools import Timer
@@ -83,11 +82,6 @@ logger.add(
     format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> --- <level>{level}</level> | Thread {thread} <level>{message}</level>"
 )
 
-tracer = trace.Trace(
-    ignoredirs=[sys.prefix, sys.exec_prefix],
-    trace=0,
-    count=1)
-
 # ======================================================================================
 
 
@@ -100,6 +94,13 @@ def main():
 
     cb_api = CoinbaseAPI()  # used for authenticated websocket
     cbp_api = CoinbaseProAPI()  # used for rest API calls
+
+    # load orderbook snapshot into queue
+    snapshot_order_count = 0
+    if LOAD_ORDERBOOK_SNAPSHOT:
+        orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
+        snapshot_loader = OrderbookSnapshotLoader(queue=data_queue, orderbook_snapshot=orderbook_snapshot)
+        snapshot_order_count = snapshot_loader.order_count
 
     # handle websocket threads
     global LOAD_FEED_FROM_JSON_FILEPATH
@@ -119,7 +120,10 @@ def main():
                     dump_feed=DUMP_FEED_INTO_JSON,
                     output_folder=OUTPUT_FOLDER,
                     module_timestamp=module_timestamp
-                )
+                ),
+                # wait until queue worker loads snapshot before piling on
+                # Todo: test this further, since the delay between snapshot and websocket start will result in stale orderbook data
+                start_immediately=True
             )
 
     # initialize plotter and queue_worker if not webhook-only mode
@@ -131,13 +135,13 @@ def main():
 
         queue_worker = OrderbookBuilder(
             queue=data_queue,
+            snapshot_order_count=snapshot_order_count,
             output_queue=depth_chart_queue,
             save_csv=SAVE_CSV,
             save_hd5=SAVE_HD5,
             save_interval=SAVE_INTERVAL,
             item_display_flags=ITEM_DISPLAY_FLAGS,
             build_candles=BUILD_CANDLES,
-            load_feed_from_json=LOAD_FEED_FROM_JSON,
             load_feed_from_json_file=LOAD_FEED_FROM_JSON_FILEPATH,
             store_feed_in_memory=STORE_FEED_IN_MEMORY,
             module_timestamp=module_timestamp,
@@ -147,7 +151,13 @@ def main():
 
         queue_worker.thread.start()
 
-    reopen_prompt = True
+        while queue_worker.queue_mode == "snapshot":
+            time.sleep(0.1)
+
+        if not ws_handler.start_signal_sent:
+            ws_handler.start_all()
+
+    reopen_prompt_flag = True  # flag that determines whether to reopen depth chart upon closing
 
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
@@ -156,17 +166,17 @@ def main():
         if PLOT_DEPTH_CHART and not WEBHOOK_ONLY:
 
             if not plotter.closed:
-                plotter.plot()
+                plotter.plot_depth_chart()
 
             else:
 
-                if reopen_prompt:
+                if reopen_prompt_flag:
                     result = ReopenDepthChart()
                     if result:
                         plotter = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
                         # time.sleep(3)
                     else:
-                        reopen_prompt = False
+                        reopen_prompt_flag = False
 
         # send kill thread signal if queue worker breaks
         if not WEBHOOK_ONLY and not queue_worker.thread.is_alive():

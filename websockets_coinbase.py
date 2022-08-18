@@ -133,6 +133,7 @@ class WebsocketClientHandler:
         # self.active = []
         self.websocket_keepalive = Thread(target=self.websocket_thread_keepalive, daemon=True)
         self.kill_signal_sent = False
+        self.start_signal_sent = False
 
     def add(self, websocket_client: WebsocketClient, start_immediately: bool = True) -> None:
         self.websocket_clients.append(websocket_client)
@@ -140,6 +141,7 @@ class WebsocketClientHandler:
             self.start(websocket_client)
 
     def start(self, websocket_client) -> None:
+        self.start_signal_sent = True
         websocket_client.start_thread()
         # self.active.append(websocket_client.id)
         if not self.websocket_keepalive.is_alive():  # start keepalive thread
@@ -201,7 +203,7 @@ class WebsocketClientHandler:
     @property
     def short_str_markets(self) -> str:
         # get market symbols and append into single string i.e. BTC,ETH,SOL
-        return ','.join([websocket.market[:websocket.market.find("-")] for websocket in self.websocket_clients])
+        return ','.join([websocket.__market[:websocket.__market.find("-")] for websocket in self.websocket_clients])
 
     @property
     def websockets_open(self) -> bool:
