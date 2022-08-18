@@ -1,12 +1,17 @@
 from pathlib import Path
 import sys
 import requests
-import json
 
 # third-party modules
 from loguru import logger
 import coinbasepro as cbp
 from decimal import Decimal
+
+# =====================================================
+# PARAMETERS
+URL = "https://api.pro.coinbase.com"
+SECRET_FILE = 'hide/apikey_coinbase_pro_full_permissions.properties'
+ACCOUNTS_FILE = 'accounts.json'
 
 # =====================================================
 logger.remove()
@@ -19,10 +24,28 @@ logger.add(
 # =====================================================
 
 
+def paginate_accounts(func):
+    """Use coinbase's account pagination to do something."""
+
+    def wrapper(self, *args, **kwargs):
+        _next = None  # initialize next wallet id
+        while True:  # this loop will run until the next_uri parameter is none (no pages left)
+            accounts = self.client.get_accounts(starting_after=_next)
+            _next = accounts.pagination.next_starting_after
+            _uri = accounts.pagination.next_uri
+            for account in accounts.data:
+                func(self, account)
+            if not _uri:
+                print("================================")
+                break
+
+    return wrapper
+
+
 class CoinbaseProAPI(cbp.AuthenticatedClient):
-    def __init__(self):
-        url = "https://api.pro.coinbase.com"
-        secret_file = 'hide/apikey_coinbase_pro_full_permissions.properties'
+    def __init__(
+            self, url=URL, secret_file=SECRET_FILE
+    ):
         api_key, api_secret, api_passphrase = self.load_apikey_properties(secret_file)
 
         super().__init__(
@@ -55,22 +78,15 @@ class CoinbaseProAPI(cbp.AuthenticatedClient):
             logger.info("Appropriate format is:\n# exchange\nAPI_KEY = X\nAPI_PASSPHRASE = XX\nAPI_SECRET = XXX")
 
         return api_key, api_secret, api_passphrase
-
-    @staticmethod
-    def save_to_json(obj, fname):
-        with open(fname, 'w', encoding='UTF-8') as f:
-            json.dump(obj, f, indent=4)
-
-    @staticmethod
-    def load_from_json(fname):
-        with open(fname, 'r') as f:
-            return json.load(f)
+        
 
 if __name__ == "__main__":
     cbp_api = CoinbaseProAPI()
+    currencies = ["MATIC"]
+    # coinbase_api.parse_accounts(get_nonzero=False, curr_list=currencies)
     products = cbp_api.get_products()
     orderbook = cbp_api.get_product_order_book('MATIC-USD', level=3)
-    cbp_api.save_to_json(orderbook, f"MATIC-USD_orderbook.json")
-
+    print(len(orderbook))
+    print(orderbook[0])
 
 
