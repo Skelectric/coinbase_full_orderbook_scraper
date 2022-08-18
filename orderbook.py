@@ -190,10 +190,7 @@ class LimitOrderBook:
         return bid_levels, ask_levels
 
     @property
-    def timestamp(self, datetime_format=False):
-        assert self.__timestamp is not None
-        if datetime_format:
-            return datetime.strptime(self.__timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+    def timestamp(self):
         return self.__timestamp
 
     def display_bid_tree(self):
@@ -1027,7 +1024,7 @@ class Order:
         self.is_bid = is_bid
         self.size = size
         self.price = price
-        self.timestamp = timestamp if timestamp else time.time()
+        self.timestamp = timestamp if timestamp is not None else datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
         # DLL attributes
         self.next_item = next_item

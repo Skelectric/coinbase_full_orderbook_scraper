@@ -6,7 +6,7 @@ from termcolor import colored
 
 from loguru import logger
 
-from helper_tools import s_print
+from tools.helper_tools import s_print
 
 import pandas as pd
 pd.set_option('display.max_rows', 500)
@@ -40,6 +40,9 @@ class WorkerDataFrame:
 
     def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename_flag: bool = False) -> None:
         """Save dataframe chunk using append."""
+
+        if not (csv or hdf):
+            return
 
         if self.total_items == 0:  # filename can't be derived if dataframe is empty
             logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")

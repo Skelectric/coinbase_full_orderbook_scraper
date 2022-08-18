@@ -2,9 +2,8 @@ import queue
 
 import numpy as np
 from loguru import logger
-from helper_tools import Timer
+from tools.helper_tools import Timer
 import threading
-import ctypes
 import easygui
 
 import matplotlib
@@ -177,7 +176,6 @@ class DepthChartPlotter:
             display_text_upper_left = (
                 f"discarding bottom/top {self.outlier_pct:.1%} of bid/ask levels.",
                 f"worst bid/ask after discard: {worst_bid_ask_txt}",
-                f"{self.unique_traders} unique client ids",
                 bid_ask_txt,
                 mid_spread_txt,
                 ask_liquidity_txt,
@@ -217,9 +215,9 @@ class DepthChartPlotter:
     def get_data(self):
 
         data = self.queue.get()
-        self.timestamp, self.sequence, self.unique_traders, \
+        self.timestamp, self.sequence, \
             bid_levels, ask_levels = \
-            data.get("timestamp"), data.get("sequence"), data.get("unique_traders"), \
+            data.get("timestamp"), data.get("sequence"), \
             data.get("bid_levels"), data.get("ask_levels")
 
         return self.transform_data(bid_levels, ask_levels, self.outlier_pct)

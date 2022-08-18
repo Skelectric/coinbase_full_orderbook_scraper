@@ -12,7 +12,7 @@ import signal
 import time
 import json
 import queue
-from helper_tools import Timer
+from tools.helper_tools import Timer
 import os
 import sys
 import itertools
@@ -398,7 +398,7 @@ class QueueWorker:
 
     def process_item(self, item: list) -> None:
         for wdf in self.worker_dataframes:
-            wdf.process_item(item)
+            wdf.__process_item(item)
 
     def finish(self) -> None:
         self.finish_up = True
