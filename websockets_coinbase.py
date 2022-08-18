@@ -25,9 +25,9 @@ class WebsocketClient:
 
     ) -> None:
         self.channel = channel
-        self.__market = market
+        self.market = market
         self.data_queue = data_queue
-        self.id = self.channel + '_' + self.__market
+        self.id = self.channel + '_' + self.market
         self.ws = None
         self.ws_url = endpoint
         self.user = api.get_user()
@@ -50,7 +50,7 @@ class WebsocketClient:
                     "Sec-WebSocket-Extensions": "permessage-deflate",
                     "user_id": self.user["legacy_id"],
                     "profile_id": self.user["id"],
-                    "product_ids": [self.__market],
+                    "product_ids": [self.market],
                     "channels": [self.channel]
                 }
             )
@@ -59,7 +59,7 @@ class WebsocketClient:
         # For local testing
         if self.dump_feed:
             json_msgs = []
-            json_filename = f"coinbase_{self.channel}_{self.__market}_dump_{self.module_timestamp}.json"
+            json_filename = f"coinbase_{self.channel}_{self.market}_dump_{self.module_timestamp}.json"
             json_filepath = Path.cwd() / self.output_folder / json_filename
 
         self.running = True
