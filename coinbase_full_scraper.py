@@ -23,14 +23,14 @@ from api_coinbase_pro import CoinbaseProAPI
 from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
 from tools.GracefulKiller import GracefulKiller
 from depthchart import DepthChartPlotter
-from tools.helper_tools import Timer
+from tools.timer import Timer
 from websockets_coinbase import WebsocketClient, WebsocketClientHandler
 
 
 # ======================================================================================
 # Script Parameters
 
-WEBHOOK_ONLY = False
+WEBHOOK_ONLY = True
 
 DUMP_FEED_INTO_JSON = False
 LOAD_FEED_FROM_JSON = False  # If true, no webhook
@@ -44,7 +44,7 @@ ITEM_DISPLAY_FLAGS = {
 }
 
 BUILD_CANDLES = False
-LOAD_ORDERBOOK_SNAPSHOT = True
+LOAD_ORDERBOOK_SNAPSHOT = False
 PLOT_DEPTH_CHART = False
 
 OUTPUT_FOLDER = 'data'
@@ -170,6 +170,8 @@ def main():
 
         while queue_worker.queue_mode == "snapshot":
             time.sleep(0.1)
+            if killer.kill_now:
+                queue_worker.stop()
 
         if not ws_handler.start_signal_sent:
             ws_handler.start_all()

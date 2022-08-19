@@ -1,4 +1,4 @@
-from tools.helper_tools import Timer
+from tools.timer import Timer
 from loguru import logger
 
 def run_once(func):

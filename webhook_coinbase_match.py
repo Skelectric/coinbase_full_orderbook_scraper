@@ -12,7 +12,7 @@ import signal
 import time
 import json
 import queue
-from tools.helper_tools import Timer
+from tools.timer import Timer
 import os
 import sys
 import itertools

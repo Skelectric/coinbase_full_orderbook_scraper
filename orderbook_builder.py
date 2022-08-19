@@ -5,28 +5,48 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue, Empty
 from threading import Thread
+from itertools import islice
 
 from loguru import logger
 from termcolor import colored
 
 from orderbook import LimitOrderBook, Order
-from tools.helper_tools import Timer, s_print
+from tools.helper_tools import s_print
+from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval
 from worker_dataframes import MatchDataFrame, CandleDataFrame
 
 
-class JustContinueException(Exception): pass
+class JustContinueException(Exception):
+    pass
+
+# Todo: make an OrderbookSnapshotSaver
 
 
 class OrderbookSnapshotLoader:
-    def __init__(self, queue: Queue, orderbook_snapshot: dict = None):
+    def __init__(self, queue: Queue, depth: int = 1000, orderbook_snapshot: dict = None):
         self.order_count = 0
-        self.load_orderbook_snapshot(orderbook_snapshot, queue)
+        self.load_orderbook_snapshot(queue, orderbook_snapshot, depth)
 
-    def load_orderbook_snapshot(self, orderbook_snapshot, _queue) -> None:
-        logger.info(f"Loading orderbook snapshot into queue...")
+    def load_orderbook_snapshot(self, _queue, orderbook_snapshot, depth) -> None:
+        msg = "Loading orderbook snapshot into queue. "
+        if depth is not None:
+            msg += f"Ignoring orders more than {depth} away from best bid/ask."
 
-        for bid in orderbook_snapshot["bids"]:
+        logger.info(msg)
+
+        bids = list(islice(orderbook_snapshot["bids"], depth))
+        asks = list(islice(orderbook_snapshot["asks"], depth))
+
+        best_bid, *_, worst_bid = bids
+        best_ask, *_, worst_ask = asks
+
+        higher = float(worst_ask[0]) / float(best_ask[0]) - 1
+        lower = 1 - float(worst_bid[0]) / float(best_bid[0])
+
+        logger.info(f"Excluding orders {higher:.1%} higher than best ask and {lower:.1%} lower than best bid.")
+
+        for bid in bids:
             item = {
                 "price": bid[0],
                 "remaining_size": bid[1],
@@ -38,7 +58,7 @@ class OrderbookSnapshotLoader:
             _queue.put(item)
             self.order_count += 1
 
-        for ask in orderbook_snapshot["asks"]:
+        for ask in asks:
             item = {
                 "price": ask[0],
                 "remaining_size": ask[1],
@@ -116,13 +136,14 @@ class OrderbookBuilder:
         # queue stats
         self.__timer = Timer()
         self.__queue_empty_timer = Timer()
-        self._queue_empty_interval = 10
+        self._queue_empty_interval = 60
         self.__queue_stats_timer = Timer()
         self._queue_stats_interval = 15  # seconds
         self.__queue_stats = defaultdict(list)
         self.__total_queue_items_processed = 0
         self.__total_queue_items_skipped = 0
         self.__queue_items_processed = 0
+        self.__prev_qsize = 0
         self.__last_timestamp = datetime.utcnow()
 
         # lob check attributes
@@ -132,9 +153,12 @@ class OrderbookBuilder:
         self.__lob_check_count = 0
 
         # queue processing modes, in order
-        queue_modes = ("snapshot", "websocket", "finish", "stop")
-        self.__finish_up = False  # end flag
-        self.__queue_modes = iter(queue_modes)
+        self._snapshot_stats_interval = 10
+        # Todo: use a linked data structure for these queue modes
+        # Todo: where each mode links to the next
+        # Todo: and each subsequent nodes is aware of all previous nodes
+        self.__queue_modes = ("snapshot", "websocket", "finish", "stop")
+        self.__queue_modes_iter = iter(self.__queue_modes)
         self.queue_mode = None
         self.__next_queue_mode()
 
@@ -153,13 +177,24 @@ class OrderbookBuilder:
             self.__fill_queue_from_json(in_data, self.queue)
 
     def __next_queue_mode(self):
-        self.queue_mode = next(self.__queue_modes)
+        self.queue_mode = next(self.__queue_modes_iter)
         logger.debug(f"Queue processing mode set to '{self.queue_mode}'")
 
+    def __skip_to_queue_mode(self, mode: str):
+        assert mode in self.__queue_modes
+        mode_index = self.__queue_modes.index(mode)
+        current_index = self.__queue_modes.index(self.queue_mode)
+        if current_index < mode_index:
+            while self.queue_mode != mode:
+                self.__next_queue_mode()
+
+    def finish(self):
+        self.__skip_to_queue_mode("finish")
+        logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
+
     def stop(self):
-        """Skip to last queue mode."""
+        self.__skip_to_queue_mode("stop")
         logger.debug(f"Stop called. Skipping any remaining items in queue.")
-        *_, self.queue_mode = self.__queue_modes
 
     @staticmethod
     def __load_iter_json(json_filepath: Path):
@@ -180,7 +215,7 @@ class OrderbookBuilder:
             self, track_average: bool = False, track_delay: bool = False,
             snapshot_mode: bool = False) -> None:
 
-        msg = ""
+        msg = ''
 
         if track_average:
             self.__queue_stats["time"].append(self.__timer.elapsed())
@@ -194,7 +229,7 @@ class OrderbookBuilder:
 
         if track_delay and self.latest_timestamp is not None:
             delta = max(datetime.utcnow() - self.latest_timestamp, timedelta(0))
-            msg += f"Script is {delta} seconds behind. "
+            logger.info(f"Script is {delta} seconds behind.")
             self.__queue_stats["delta"].append(delta)
             self.__queue_stats["delta"] = self.__queue_stats["delta"][-1000:]  # limit to 1000 measurements
 
@@ -202,22 +237,27 @@ class OrderbookBuilder:
             snapshot_orders = self.__snapshot_order_count - self.lob.items_processed
             msg += f"Snapshot orders left = {snapshot_orders}. "
 
-        msg += f"Queue size = {self.queue.qsize()}. "
+        msg += f"Queue size = {self.queue.qsize()}."
+        logger.info(msg)
+
         delta = datetime.utcnow() - self.__last_timestamp
         # logger.debug(delta.total_seconds())
         if delta.total_seconds() > 0.1:
-            items_per_sec = self.__queue_items_processed // delta.total_seconds()
-            msg += f"Items processed per second = {items_per_sec:,}"
+            dones_per_sec = self.__queue_items_processed // delta.total_seconds()
+            logger.info(f"Items processed per second = {dones_per_sec:,}")
             self.__last_timestamp = datetime.utcnow()
             self.__queue_items_processed = 0
 
-        logger.info(msg)
+            # derive queue inflow rate
+            puts_per_sec = (self.queue.qsize() - self.__prev_qsize) // delta.total_seconds()
+            logger.info(f"Items added per second = {puts_per_sec:,}")
+            self.__prev_qsize = self.queue.qsize()
 
     @run_once_per_interval("_queue_stats_interval")
     def __timed_get_queue_stats(self, *args, **kwargs):
         self.__get_queue_stats(*args, **kwargs)
 
-    @run_once_per_interval(5)
+    @run_once_per_interval("_snapshot_stats_interval")
     def __track_snapshot_load(self):
         self.__get_queue_stats(snapshot_mode=True)
 
@@ -280,12 +320,6 @@ class OrderbookBuilder:
         if self.lob.items_processed == self.__snapshot_order_count:
             logger.info(f"Snapshot processed.")
             self.__next_queue_mode()
-
-    def finish(self):
-        # Todo: make queue mode skip to finish, not just go to next queue mode.
-        # Todo: need that to finish from snapshot mode
-        self.__next_queue_mode()
-        logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
 
     def __check_finished(self):
         if self.queue.empty():

@@ -246,7 +246,8 @@ class LimitOrderBook:
 
         if len(self.__bid_levels) > self.tree_size_display_cutoff:
             msg = f"Bids AVL Tree too large to display ({len(self.__bid_levels):,} nodes). "
-            msg += f"Increase tree_size_display_cutoff ({self.tree_size_display_cutoff:,}) to display larger trees."
+            msg += f"Increase tree_size_display_cutoff ({self.tree_size_display_cutoff:,}) "
+            msg += f"in orderbook.py to display larger trees."
             logger.info(msg)
         else:
             logger.info(f"{len(self.__bid_levels)} bid levels = {self.__bid_levels}:")
@@ -254,7 +255,8 @@ class LimitOrderBook:
 
         if len(self.__ask_levels) > self.tree_size_display_cutoff:
             msg = f"Asks AVL Tree too large to display ({len(self.__ask_levels):,} nodes). "
-            msg += f"Increase tree_size_display_cutoff ({self.tree_size_display_cutoff:,}) to display larger trees."
+            msg += f"Increase tree_size_display_cutoff ({self.tree_size_display_cutoff:,}) "
+            msg += f"in orderbook.py to display larger trees."
             logger.info(msg)
         else:
             logger.info(f"{len(self.__ask_levels)} ask levels = {self.__ask_levels}:")
