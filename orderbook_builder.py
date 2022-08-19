@@ -108,8 +108,8 @@ class OrderbookBuilder:
         self.candles = None
         if build_candles:
             self.candles = CandleDataFrame(exchange="Coinbase", frequency="1T", timestamp=module_timestamp)
-        self.last_sequence = 0
-        self.last_timestamp = None
+        self.latest_sequence = 0
+        self.latest_timestamp = None
         self.queue = queue
         self.output_queue = output_queue
 
@@ -118,9 +118,12 @@ class OrderbookBuilder:
         self.__queue_empty_timer = Timer()
         self._queue_empty_interval = 10
         self.__queue_stats_timer = Timer()
-        self._queue_stats_interval = 60  # seconds
+        self._queue_stats_interval = 15  # seconds
         self.__queue_stats = defaultdict(list)
-        self.__queue_empty_displayed = False
+        self.__total_queue_items_processed = 0
+        self.__total_queue_items_skipped = 0
+        self.__queue_items_processed = 0
+        self.__last_timestamp = datetime.utcnow()
 
         # lob check attributes
         self.__lob_check_timer = Timer()
@@ -129,10 +132,9 @@ class OrderbookBuilder:
         self.__lob_check_count = 0
 
         # queue processing modes, in order
+        queue_modes = ("snapshot", "websocket", "finish", "stop")
         self.__finish_up = False  # end flag
-        self.__queue_modes = iter(
-            ("snapshot", "websocket", "finish", "stop")
-        )
+        self.__queue_modes = iter(queue_modes)
         self.queue_mode = None
         self.__next_queue_mode()
 
@@ -154,6 +156,11 @@ class OrderbookBuilder:
         self.queue_mode = next(self.__queue_modes)
         logger.debug(f"Queue processing mode set to '{self.queue_mode}'")
 
+    def stop(self):
+        """Skip to last queue mode."""
+        logger.debug(f"Stop called. Skipping any remaining items in queue.")
+        *_, self.queue_mode = self.__queue_modes
+
     @staticmethod
     def __load_iter_json(json_filepath: Path):
         with open(json_filepath, 'r') as f:
@@ -169,7 +176,12 @@ class OrderbookBuilder:
             else:
                 break
 
-    def __get_queue_stats(self, track_average: bool = False, track_delay: bool = False) -> None:
+    def __get_queue_stats(
+            self, track_average: bool = False, track_delay: bool = False,
+            snapshot_mode: bool = False) -> None:
+
+        msg = ""
+
         if track_average:
             self.__queue_stats["time"].append(self.__timer.elapsed())
             self.__queue_stats["queue_sizes"].append(self.queue.qsize())
@@ -180,22 +192,34 @@ class OrderbookBuilder:
             self.__queue_stats["queue_sizes"] = self.__queue_stats["queue_sizes"][-1000:]
             self.__queue_stats["avg_qsize"] = self.__queue_stats["avg_qsize"][-1000:]
 
-        if track_delay and self.last_timestamp is not None:
-            delta = max(datetime.utcnow() - self.last_timestamp, timedelta(0))
-            logger.info(f"Script is {delta} seconds behind. Queue size = {self.queue.qsize()}")
+        if track_delay and self.latest_timestamp is not None:
+            delta = max(datetime.utcnow() - self.latest_timestamp, timedelta(0))
+            msg += f"Script is {delta} seconds behind. "
             self.__queue_stats["delta"].append(delta)
             self.__queue_stats["delta"] = self.__queue_stats["delta"][-1000:]  # limit to 1000 measurements
 
-        if not (track_average or track_delay):
-            logger.info(f"Queue size = {self.queue.qsize()}")
+        if snapshot_mode:
+            snapshot_orders = self.__snapshot_order_count - self.lob.items_processed
+            msg += f"Snapshot orders left = {snapshot_orders}. "
+
+        msg += f"Queue size = {self.queue.qsize()}. "
+        delta = datetime.utcnow() - self.__last_timestamp
+        # logger.debug(delta.total_seconds())
+        if delta.total_seconds() > 0.1:
+            items_per_sec = self.__queue_items_processed // delta.total_seconds()
+            msg += f"Items processed per second = {items_per_sec:,}"
+            self.__last_timestamp = datetime.utcnow()
+            self.__queue_items_processed = 0
+
+        logger.info(msg)
 
     @run_once_per_interval("_queue_stats_interval")
     def __timed_get_queue_stats(self, *args, **kwargs):
         self.__get_queue_stats(*args, **kwargs)
 
-    @run_once_per_interval(2)
+    @run_once_per_interval(5)
     def __track_snapshot_load(self):
-        self.__get_queue_stats()
+        self.__get_queue_stats(snapshot_mode=True)
 
     def __save_dataframes(self, final: bool = False) -> None:
         if not (self.__save_CSV or self.__save_HD5):
@@ -218,7 +242,7 @@ class OrderbookBuilder:
 
     def save_orderbook_snapshot(self) -> None:
         # Todo: build a custom JSON encoder for orderbook class
-        last_timestamp = datetime.strftime(self.last_timestamp, "%Y%m%d-%H%M%S")
+        last_timestamp = datetime.strftime(self.latest_timestamp, "%Y%m%d-%H%M%S")
         json_filename = f"coinbase_{self.__market}_orderbook_snapshot_{last_timestamp}.json"
         json_filepath = Path.cwd() / self.__output_folder / json_filename
         with open(json_filepath, 'w', encoding='UTF-8') as f:
@@ -249,8 +273,7 @@ class OrderbookBuilder:
         """Check on main thread and choose next queue mode if main thread broke."""
         if not threading.main_thread().is_alive():
             logger.critical("Main thread is dead! Wrapping it up...")
-            # skips to the last queue mode
-            *_, self.queue_mode = self.__queue_modes
+            self.stop()
 
     def __check_snapshot_done(self):
         # Todo: consider concluding snapshot done when items from queue are no longer type 'snapshot'
@@ -259,6 +282,8 @@ class OrderbookBuilder:
             self.__next_queue_mode()
 
     def finish(self):
+        # Todo: make queue mode skip to finish, not just go to next queue mode.
+        # Todo: need that to finish from snapshot mode
         self.__next_queue_mode()
         logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
 
@@ -273,20 +298,23 @@ class OrderbookBuilder:
         else:
             logger.info("Queue is empty. Exiting thread.")
 
-    def __get_and_process_item(self):
+    def __get_and_process_item(self, *args, **kwargs):
         """Get item from queue and call process_item.
         Raises JustContinueException if item is None, to enable use of continue in outer loop (__process_queue).
         """
         try:
             item = self.queue.get(timeout=0.01)
             if item is None:
+                self.__total_queue_items_skipped += 1
                 raise JustContinueException
             try:
-                self.__process_item(item)
+                self.__process_item(item, *args, **kwargs)
             # except Exception as e:
             #     logger.critical(e)
             finally:
                 self.queue.task_done()
+                self.__total_queue_items_processed += 1
+                self.__queue_items_processed += 1
                 self.__lob_checked = False
         except Empty as e:
             raise Empty
@@ -297,7 +325,8 @@ class OrderbookBuilder:
         self.__save_timer.start()
         self.__queue_stats_timer.start()
         self.__queue_empty_timer.start()
-        logger.info(f"Queue worker starting now in {self.queue_mode} mode. Starting queue size: {self.queue.qsize()} items")
+        logger.info(
+            f"Queue worker starting now in {self.queue_mode} mode. Starting queue size: {self.queue.qsize()} items")
 
         while True:
 
@@ -307,7 +336,7 @@ class OrderbookBuilder:
 
                 case "snapshot":
                     try:
-                        self.__get_and_process_item()
+                        self.__get_and_process_item(output_data=False)
                     except JustContinueException:
                         continue
                     except Empty:
@@ -346,7 +375,7 @@ class OrderbookBuilder:
     def __log_summary(self):
         logger.info("________________________________ Summary ________________________________")
         self.lob.log_details()
-        logger.info(f"Matches processed = {self.matches.total_items}")
+        logger.info(f"Matches processed = {self.matches.total_items:,}")
         if self.candles is not None:
             logger.info(f"Candles generated = {self.candles.total_items}")
 
@@ -356,11 +385,13 @@ class OrderbookBuilder:
             average_timedelta = sum(self.__queue_stats["delta"], timedelta(0)) / len(self.__queue_stats["delta"])
             logger.info(f"Average webhook-processing delay = {average_timedelta}")
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
-        logger.info(f"________________________________ Summary End ________________________________")
+            logger.info(f"Total items processed from queue = {self.__total_queue_items_processed:,}")
 
         # Todo: Add more
 
-    def __process_item(self, item: dict) -> None:
+        logger.info(f"________________________________ Summary End ________________________________")
+
+    def __process_item(self, item: dict, output_data: bool = True) -> None:
 
         # s_print(f"item = {item}")
 
@@ -380,12 +411,12 @@ class OrderbookBuilder:
         valid_sequence, valid_received, valid_open, valid_done, valid_change = True, True, True, True, True
 
         # snapshot items all have the same sequence
-        if item_type != "snapshot" and (sequence is None or sequence <= self.last_sequence):
+        if item_type != "snapshot" and (sequence is None or sequence <= self.latest_sequence):
             valid_sequence = False
         else:
-            self.last_sequence = sequence
-            if timestamp is not None:
-                self.last_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+            self.latest_sequence = sequence
+            self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ") \
+                if timestamp is not None else datetime.utcnow()
 
         match item_type:
             case "received":
@@ -444,7 +475,8 @@ class OrderbookBuilder:
                 # self.lob.display_bid_tree()
                 # self.lob.display_ask_tree()
                 # self.lob.check()
-                self.output_data()
+                if output_data:
+                    self.output_data()
 
             # process order cancels
             case "done" if valid_done and valid_sequence:
@@ -467,7 +499,8 @@ class OrderbookBuilder:
                 # self.lob.display_bid_tree()
                 # self.lob.display_ask_tree()
                 # self.lob.check()
-                self.output_data()
+                if output_data:
+                    self.output_data()
 
             # process order changes
             case "change" if valid_change and valid_sequence:
@@ -490,7 +523,8 @@ class OrderbookBuilder:
                 # self.lob.display_bid_tree()
                 # self.lob.display_ask_tree()
                 # self.lob.check()
-                self.output_data()
+                if output_data:
+                    self.output_data()
 
             # process trades
             case "match" if valid_sequence:
@@ -499,7 +533,7 @@ class OrderbookBuilder:
                     self.candles.process_item(item)
 
             case _ if not valid_sequence:
-                logger.warning(f"Item below provided out of sequence (current={self.last_sequence}, provided={sequence})")
+                logger.warning(f"Item below provided out of sequence (current={self.latest_sequence}, provided={sequence})")
                 logger.warning(f"{item}")
                 logger.info("Skipping processing...")
 
@@ -518,7 +552,7 @@ class OrderbookBuilder:
             bid_levels, ask_levels = self.lob.levels
             data = {
                 "timestamp": timestamp,
-                "sequence": self.last_sequence,
+                "sequence": self.latest_sequence,
                 "bid_levels": bid_levels,
                 "ask_levels": ask_levels
             }
@@ -533,4 +567,5 @@ class OrderbookBuilder:
         line_output = f"Subscribed to {self.exchange}'s '{self.__market}' channel "
         line_output += f"for {item['channels'][0]['product_ids'][0]}"
         s_print(colored(line_output, "yellow"))
+
 

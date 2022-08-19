@@ -12,6 +12,7 @@ import sys
 import itertools
 from pathlib import Path
 import time
+import easygui
 
 import pandas as pd
 pd.options.display.float_format = '{:.6f}'.format
@@ -21,7 +22,7 @@ from api_coinbase import CoinbaseAPI
 from api_coinbase_pro import CoinbaseProAPI
 from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
 from tools.GracefulKiller import GracefulKiller
-from depthchart import DepthChartPlotter, ReopenDepthChart
+from depthchart import DepthChartPlotter
 from tools.helper_tools import Timer
 from websockets_coinbase import WebsocketClient, WebsocketClientHandler
 
@@ -43,8 +44,8 @@ ITEM_DISPLAY_FLAGS = {
 }
 
 BUILD_CANDLES = False
-LOAD_ORDERBOOK_SNAPSHOT = False
-PLOT_DEPTH_CHART = True
+LOAD_ORDERBOOK_SNAPSHOT = True
+PLOT_DEPTH_CHART = False
 
 OUTPUT_FOLDER = 'data'
 
@@ -83,6 +84,22 @@ logger.add(
 )
 
 # ======================================================================================
+
+
+# windows only
+# def ReopenDepthChart(title, text, style):
+#     return ctypes.windll.user32.MessageBoxW(0, text, title, style)
+
+
+def reopen_depth_chart():
+    return easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
+
+
+def skip_finish_processing(data_qsize_cutoff: int):
+    title = "Orderbook Builder wrapping up..."
+    msg = f"More than {data_qsize_cutoff:,} pending items in orderbook queue.\n"
+    msg += "Skip remaining items?"
+    return easygui.ynbox(msg)
 
 
 def main():
@@ -171,7 +188,7 @@ def main():
             else:
 
                 if reopen_prompt_flag:
-                    result = ReopenDepthChart()
+                    result = reopen_depth_chart()
                     if result:
                         plotter = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
                         # time.sleep(3)
@@ -193,6 +210,12 @@ def main():
 
     if not WEBHOOK_ONLY:
         queue_worker.finish()
+
+        data_qsize_cutoff = 10000
+        if data_queue.qsize() > data_qsize_cutoff:
+            result = skip_finish_processing(data_qsize_cutoff)
+            if result:
+                queue_worker.stop()
 
         if queue_worker.thread.is_alive():
             queue_worker.thread.join()

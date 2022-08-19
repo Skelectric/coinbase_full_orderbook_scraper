@@ -36,6 +36,7 @@ class LimitOrderBook:
 
         # stats
         self.items_processed = 0
+        self.tree_size_display_cutoff = 500
 
     @property
     def empty(self) -> bool:
@@ -243,11 +244,23 @@ class LimitOrderBook:
                 logger.info(msg)
             logger.info('-------------------------------')
 
-        logger.info(f"{len(self.__bid_levels)} bid levels = {self.__bid_levels}:")
-        self.display_bid_tree()
-        logger.info(f"{len(self.__ask_levels)} ask levels = {self.__ask_levels}:")
-        self.display_ask_tree()
-        logger.info(f"Items processed: {self.items_processed:,}")
+        if len(self.__bid_levels) > self.tree_size_display_cutoff:
+            msg = f"Bids AVL Tree too large to display ({len(self.__bid_levels):,} nodes). "
+            msg += f"Increase tree_size_display_cutoff ({self.tree_size_display_cutoff:,}) to display larger trees."
+            logger.info(msg)
+        else:
+            logger.info(f"{len(self.__bid_levels)} bid levels = {self.__bid_levels}:")
+            self.display_bid_tree()
+
+        if len(self.__ask_levels) > self.tree_size_display_cutoff:
+            msg = f"Asks AVL Tree too large to display ({len(self.__ask_levels):,} nodes). "
+            msg += f"Increase tree_size_display_cutoff ({self.tree_size_display_cutoff:,}) to display larger trees."
+            logger.info(msg)
+        else:
+            logger.info(f"{len(self.__ask_levels)} ask levels = {self.__ask_levels}:")
+            self.display_ask_tree()
+
+        logger.info(f"Items processed by Orderbook: {self.items_processed:,}")
 
 
 class LimitLevel:

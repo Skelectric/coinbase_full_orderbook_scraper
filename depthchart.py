@@ -24,14 +24,6 @@ def new_home(self, *args):
 
 NavigationToolbar2.home = new_home
 
-# windows only
-# def ReopenDepthChart(title, text, style):
-#     return ctypes.windll.user32.MessageBoxW(0, text, title, style)
-
-
-def ReopenDepthChart():
-    return easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
-
 
 class DepthChartPlotter:
     # Todo: Build multi-orderbook support
