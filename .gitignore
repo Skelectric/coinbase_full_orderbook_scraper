@@ -6,6 +6,7 @@ __pycache__/
 logs/
 data/
 hide/
+reference/
 accounts.json
 
 # Compiled source #

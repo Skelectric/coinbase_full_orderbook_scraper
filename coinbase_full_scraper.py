@@ -3,28 +3,28 @@
 
 from loguru import logger
 
-
 logger.remove()  # remove default logger
 
 from datetime import datetime
-from queue import Queue
+import queue
 import sys
 import itertools
 from pathlib import Path
 import time
 import easygui
-
+import multiprocessing as mp
 import pandas as pd
 pd.options.display.float_format = '{:.6f}'.format
 
 # homebrew modules
 from api_coinbase import CoinbaseAPI
 from api_coinbase_pro import CoinbaseProAPI
+from websockets_coinbase import WebsocketClient, WebsocketClientHandler
 from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
 from tools.GracefulKiller import GracefulKiller
-from depthchart import DepthChartPlotter
 from tools.timer import Timer
-from websockets_coinbase import WebsocketClient, WebsocketClientHandler
+from plotting.depthchart import DepthChartPlotter
+from plotting.timer_chart import PerformancePlotter
 
 
 # ======================================================================================
@@ -46,7 +46,7 @@ ITEM_DISPLAY_FLAGS = {
 BUILD_CANDLES = False
 LOAD_ORDERBOOK_SNAPSHOT = False
 PLOT_DEPTH_CHART = False
-
+PLOT_TIMER_CHART = True
 OUTPUT_FOLDER = 'data'
 
 # for simulating feed
@@ -106,8 +106,20 @@ def main():
     # ensure 'data' output folder exists
     Path('data').mkdir(parents=True, exist_ok=True)
 
-    data_queue = Queue()
-    depth_chart_queue = Queue(maxsize=1)
+    data_queue = queue.Queue()
+
+    depth_chart_queue = None
+    if PLOT_DEPTH_CHART:
+        depth_chart_queue = queue.Queue(maxsize=1)
+
+    timer_queue = None
+    if PLOT_TIMER_CHART:
+        timer_queue = mp.Queue()
+
+    ws_handler = None
+    depth_chart = None
+    timer_chart = None
+    display_process = None
 
     cb_api = CoinbaseAPI()  # used for authenticated websocket
     cbp_api = CoinbaseProAPI()  # used for rest API calls
@@ -133,6 +145,7 @@ def main():
                     channel=channel,
                     market=market,
                     data_queue=data_queue,
+                    timer_queue=timer_queue,
                     endpoint=ENDPOINT,
                     dump_feed=DUMP_FEED_INTO_JSON,
                     output_folder=OUTPUT_FOLDER,
@@ -143,12 +156,11 @@ def main():
                 start_immediately=True
             )
 
-    # initialize plotter and queue_worker if not webhook-only mode
+    # initialize depth_chart and queue_worker if not webhook-only mode
     if not WEBHOOK_ONLY:
 
-        plotter = None
         if PLOT_DEPTH_CHART:
-            plotter = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
+            depth_chart = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
 
         queue_worker = OrderbookBuilder(
             queue=data_queue,
@@ -176,26 +188,40 @@ def main():
         if not ws_handler.start_signal_sent:
             ws_handler.start_all()
 
+    process_mgr = mp.Manager()
+    mgr_list = process_mgr.list()
+
+    # start process speed charting in separate process
+    if PLOT_TIMER_CHART:
+        timer_chart = PerformancePlotter(queue=timer_queue)
+        display_process = mp.Process(target=timer_chart.start(), daemon=True)
+        display_process.start()
+
+    logger.debug(f"test 1")
+
     reopen_prompt_flag = True  # flag that determines whether to reopen depth chart upon closing
 
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
 
-        # run plotter
+        logger.debug(f"killer.kill_now = {killer.kill_now}")
+
+        # run depth_chart
         if PLOT_DEPTH_CHART and not WEBHOOK_ONLY:
 
-            if not plotter.closed:
-                plotter.plot_depth_chart()
+            if not depth_chart.closed:
+                depth_chart.plot_depth_chart()
 
             else:
 
                 if reopen_prompt_flag:
                     result = reopen_depth_chart()
                     if result:
-                        plotter = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
+                        depth_chart = DepthChartPlotter(title=f"Coinbase - {MARKETS[0]}", queue=depth_chart_queue)
                         # time.sleep(3)
                     else:
                         reopen_prompt_flag = False
+
 
         # send kill thread signal if queue worker breaks
         if not WEBHOOK_ONLY and not queue_worker.thread.is_alive():
@@ -204,6 +230,16 @@ def main():
         if not ws_handler.all_threads_alive():
             logger.critical(f"Not all websocket threads alive!")
             killer.kill_now = True
+
+        time.sleep(1)
+
+    logger.debug(f"killer.kill_now = {killer.kill_now}")
+
+    # wait for time chart to stop
+    if display_process is not None:
+        display_process.join()
+
+    logger.debug("display process joined.")
 
     try:
         ws_handler.kill_all()
@@ -223,8 +259,8 @@ def main():
             queue_worker.thread.join()
 
         if PLOT_DEPTH_CHART:
-            # logger.info(f"Remaining plotter queue size: {plotter.queue.qsize()}")
-            plotter.queue.queue.clear()
+            # logger.info(f"Remaining depth_chart queue size: {depth_chart.queue.qsize()}")
+            depth_chart.queue.queue.clear()
 
         logger.info(f"Remaining data queue size: {data_queue.qsize()}")
         if data_queue.qsize() != 0:

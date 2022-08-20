@@ -2,14 +2,20 @@ import json
 import threading
 import time
 from pathlib import Path
-from queue import Queue
+import multiprocessing as mp
+import queue
 from threading import Thread
-from tools.helper_tools import s_print
-
-from loguru import logger
 from websocket import create_connection, WebSocketConnectionClosedException
+from datetime import datetime
 
+# third party modules
+from loguru import logger
 from api_coinbase import CoinbaseAPI
+
+# homebrew modules
+from tools.helper_tools import s_print
+from tools.timer import Timer
+from tools.run_once_per_interval import run_once_per_interval
 
 class WebsocketClient:
     def __init__(
@@ -17,7 +23,8 @@ class WebsocketClient:
             api: CoinbaseAPI,
             channel: str,
             market: str,
-            data_queue: Queue = None,
+            data_queue: queue.Queue = None,
+            timer_queue: mp.Queue = None,
             endpoint: str = None,
             dump_feed: bool = False,
             output_folder: str = None,
@@ -27,6 +34,7 @@ class WebsocketClient:
         self.channel = channel
         self.market = market
         self.data_queue = data_queue
+        self.timer_queue = timer_queue
         self.id = self.channel + '_' + self.market
         self.ws = None
         self.ws_url = endpoint
@@ -39,6 +47,9 @@ class WebsocketClient:
         self.output_folder = output_folder
         self.module_timestamp = module_timestamp
 
+        # performance testing
+        self.counter = 0
+        self.timer = Timer()
 
     def websocket_thread(self) -> None:
         self.ws = create_connection(self.ws_url)
@@ -66,6 +77,10 @@ class WebsocketClient:
 
         feed = None
         while not self.kill and threading.main_thread().is_alive():
+
+            if self.timer_queue is not None:
+                self.__output_perf_data()
+
             try:
                 feed = self.ws.recv()
                 if feed:
@@ -87,6 +102,9 @@ class WebsocketClient:
                 else:
                     logger.warning("Webhook message is empty!")
 
+        if self.timer_queue is not None:
+            self.__end_perf_data()
+
         # close websocket
         try:
             if self.ws:
@@ -102,8 +120,28 @@ class WebsocketClient:
 
         self.running = False
 
+    @run_once_per_interval(0.03)
+    def __output_perf_data(self):
+        delta = self.timer.delta()
+        item = (
+            datetime.utcnow().timestamp(),
+            "websocket_thread_loop",
+            self.counter,
+        )
+        self.counter = 0
+        self.timer_queue.put(item)
+
+    def __end_perf_data(self):
+        item = (
+            datetime.utcnow().timestamp(),
+            "websocket_thread_loop",
+            "done"
+        )
+        self.timer_queue.put(item)
+
     def process_msg(self, msg: dict):
         self.data_queue.put(msg)
+        self.counter += 1
         return None
 
     def start_thread(self) -> None:

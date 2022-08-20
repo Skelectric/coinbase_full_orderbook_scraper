@@ -11,11 +11,11 @@ class Timer:
         if self.start_time is not None:
             raise TimerError(f"Timer is running. Use .stop() to stop it")
 
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
 
     def reset(self) -> None:
         """Reset timer."""
-        self.start_time = time.time()
+        self.start_time = time.perf_counter()
 
     def lap(self):
         elapsed = self.elapsed()
@@ -27,7 +27,7 @@ class Timer:
         if self.start_time is None:
             raise TimerError(f"Timer is not running. Use .start() to start it")
 
-        elapsed_time = time.time() - self.start_time
+        elapsed_time = time.perf_counter() - self.start_time
         hours, rem = divmod(elapsed_time, 3600)
         minutes, seconds = divmod(rem, 60)
 
@@ -41,12 +41,16 @@ class Timer:
 
     def delta(self):
         if self.start_time is None:
-            raise TimerError(f"Timer is not running. Use .start() to start it")
+            self.start()
 
         if self.last_time is None:
             self.last_time = self.start_time
 
-        return time.time() - self.last_time()
+        now = time.perf_counter()
+        delta = now - self.last_time
+        self.last_time = now
+
+        return delta
 
     @staticmethod
     def seconds_to_hms(seconds: int) -> str:
