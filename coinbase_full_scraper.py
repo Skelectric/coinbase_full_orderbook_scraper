@@ -24,13 +24,13 @@ from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
 from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
 from plotting.depthchart import DepthChartPlotter
-from plotting.timer_chart import PerformancePlotter
+from plotting.timer_chart import initialize_plotter
 
 
 # ======================================================================================
 # Script Parameters
 
-WEBHOOK_ONLY = True
+WEBHOOK_ONLY = False
 
 DUMP_FEED_INTO_JSON = False
 LOAD_FEED_FROM_JSON = False  # If true, no webhook
@@ -45,19 +45,20 @@ ITEM_DISPLAY_FLAGS = {
 
 BUILD_CANDLES = False
 LOAD_ORDERBOOK_SNAPSHOT = False
-PLOT_DEPTH_CHART = False
-PLOT_TIMER_CHART = True
+PLOT_DEPTH_CHART = True
+PLOT_TIMER_CHART = False
 OUTPUT_FOLDER = 'data'
 
 # for simulating feed
 LOAD_FEED_FROM_JSON_FILEPATH = Path.cwd() / OUTPUT_FOLDER / "full_SNX-USD_dump_20220807-021730.json"
 
-FREQUENCY = '1T'  # 1 min
+CANDLE_FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
 SAVE_CSV = False
 SAVE_HD5 = False  # Todo: Test this
 SAVE_INTERVAL = 360
 STORE_FEED_IN_MEMORY = False
+TIMER_QUEUE_INTERVAL = 0.1  # output to performance plotter queue every interval seconds
 
 # ======================================================================================
 # Webhook Parameters
@@ -102,7 +103,12 @@ def skip_finish_processing(data_qsize_cutoff: int):
     return easygui.ynbox(msg)
 
 
-def main():
+if __name__ == '__main__':
+    module_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    module_timer = Timer()
+    module_timer.start()
+    killer = GracefulKiller()
+
     # ensure 'data' output folder exists
     Path('data').mkdir(parents=True, exist_ok=True)
 
@@ -132,7 +138,6 @@ def main():
         snapshot_order_count = snapshot_loader.order_count
 
     # handle websocket threads
-    global LOAD_FEED_FROM_JSON_FILEPATH
     if not LOAD_FEED_FROM_JSON:
         LOAD_FEED_FROM_JSON_FILEPATH = None
 
@@ -145,11 +150,12 @@ def main():
                     channel=channel,
                     market=market,
                     data_queue=data_queue,
-                    timer_queue=timer_queue,
                     endpoint=ENDPOINT,
                     dump_feed=DUMP_FEED_INTO_JSON,
                     output_folder=OUTPUT_FOLDER,
-                    module_timestamp=module_timestamp
+                    module_timestamp=module_timestamp,
+                    timer_queue=timer_queue,
+                    timer_queue_interval=TIMER_QUEUE_INTERVAL,
                 ),
                 # wait until queue worker loads snapshot before piling on
                 # Todo: test this further, since the delay between snapshot and websocket start will result in stale orderbook data
@@ -175,7 +181,9 @@ def main():
             store_feed_in_memory=STORE_FEED_IN_MEMORY,
             module_timestamp=module_timestamp,
             module_timer=module_timer,
-            exchange=EXCHANGE
+            exchange=EXCHANGE,
+            timer_queue=timer_queue,
+            timer_queue_interval=TIMER_QUEUE_INTERVAL,
         )
 
         queue_worker.thread.start()
@@ -193,18 +201,17 @@ def main():
 
     # start process speed charting in separate process
     if PLOT_TIMER_CHART:
-        timer_chart = PerformancePlotter(queue=timer_queue)
-        display_process = mp.Process(target=timer_chart.start(), daemon=True)
+        display_process = mp.Process(
+            target=initialize_plotter,
+            args=(timer_queue, ),
+            name="Performance Plotter"
+        )
         display_process.start()
-
-    logger.debug(f"test 1")
 
     reopen_prompt_flag = True  # flag that determines whether to reopen depth chart upon closing
 
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
-
-        logger.debug(f"killer.kill_now = {killer.kill_now}")
 
         # run depth_chart
         if PLOT_DEPTH_CHART and not WEBHOOK_ONLY:
@@ -233,13 +240,11 @@ def main():
 
         time.sleep(1)
 
-    logger.debug(f"killer.kill_now = {killer.kill_now}")
-
     # wait for time chart to stop
     if display_process is not None:
-        display_process.join()
-
-    logger.debug("display process joined.")
+        display_process.join(5)
+        logger.debug("display process joined.")
+        display_process.terminate()
 
     try:
         ws_handler.kill_all()
@@ -269,10 +274,4 @@ def main():
             logger.info(f"Queues cleared.")
 
 
-if __name__ == '__main__':
-    module_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    module_timer = Timer()
-    module_timer.start()
-    killer = GracefulKiller()
-    main()
     logger.info(f"Elapsed time = {module_timer.elapsed(hms_format=True)}")

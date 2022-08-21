@@ -19,10 +19,12 @@ def run_once_per_interval(interval_attribute):
             if isinstance(interval_attribute, str):
                 self = args[0]
                 interval = getattr(self, interval_attribute)
-                assert isinstance(interval, float)
+                msg = f"interval {interval} is type {type(interval)}"
+                assert isinstance(interval, (int, float)), msg
             # otherwise, assume it's an integer and use as-is
             else:
-                assert isinstance(interval_attribute, float)
+                msg = f"interval {interval_attribute} is type {type(interval_attribute)}"
+                assert isinstance(interval_attribute, (int, float)), msg
                 interval = interval_attribute
             # if first call, start timer and run function
             if wrapper.timer.start_time is None:

@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue, Empty
+import multiprocessing as mp
 from threading import Thread
 from itertools import islice
 
@@ -13,7 +14,7 @@ from termcolor import colored
 from orderbook import LimitOrderBook, Order
 from tools.helper_tools import s_print
 from tools.timer import Timer
-from tools.run_once_per_interval import run_once_per_interval
+from tools.run_once_per_interval import run_once_per_interval, run_once
 from worker_dataframes import MatchDataFrame, CandleDataFrame
 
 
@@ -90,7 +91,9 @@ class OrderbookBuilder:
             store_feed_in_memory: bool = False,
             module_timestamp: str = None,
             module_timer: Timer = None,
-            exchange: str = "Coinbase"
+            exchange: str = "Coinbase",
+            timer_queue: mp.Queue = None,
+            timer_queue_interval: float = None,
     ):
         # queue worker options
         self.__market = None
@@ -176,6 +179,34 @@ class OrderbookBuilder:
             in_data = self.__load_iter_json(load_feed_from_json_file)
             self.__fill_queue_from_json(in_data, self.queue)
 
+        # performance monitoring
+        self.__counter = 0
+        self.timer = Timer()
+        self.timer_queue = timer_queue
+        self.timer_queue_interval = timer_queue_interval
+
+    @run_once_per_interval("timer_queue_interval")
+    def __output_perf_data(self):
+        if self.timer_queue is not None:
+            # delta = self.timer.delta()
+            item = (
+                datetime.utcnow().timestamp(),
+                "orderbook_build_loop",
+                self.__counter,
+            )
+            self.__counter = 0
+            self.timer_queue.put(item)
+
+    @run_once
+    def __end_perf_data(self):
+        if self.timer_queue is not None:
+            item = (
+                datetime.utcnow().timestamp(),
+                "orderbook_build_loop",
+                "done"
+            )
+            self.timer_queue.put(item)
+
     def __next_queue_mode(self):
         self.queue_mode = next(self.__queue_modes_iter)
         logger.debug(f"Queue processing mode set to '{self.queue_mode}'")
@@ -247,11 +278,6 @@ class OrderbookBuilder:
             logger.info(f"Items processed per second = {dones_per_sec:,}")
             self.__last_timestamp = datetime.utcnow()
             self.__queue_items_processed = 0
-
-            # derive queue inflow rate
-            puts_per_sec = (self.queue.qsize() - self.__prev_qsize) // delta.total_seconds()
-            logger.info(f"Items added per second = {puts_per_sec:,}")
-            self.__prev_qsize = self.queue.qsize()
 
     @run_once_per_interval("_queue_stats_interval")
     def __timed_get_queue_stats(self, *args, **kwargs):
@@ -343,13 +369,15 @@ class OrderbookBuilder:
                 raise JustContinueException
             try:
                 self.__process_item(item, *args, **kwargs)
-            # except Exception as e:
-            #     logger.critical(e)
-            finally:
-                self.queue.task_done()
+            except Exception as e:
+                logger.critical(f"Exception: {e}")
+            else:
+                self.__counter += 1
                 self.__total_queue_items_processed += 1
                 self.__queue_items_processed += 1
                 self.__lob_checked = False
+            finally:
+                self.queue.task_done()
         except Empty as e:
             raise Empty
 
@@ -376,6 +404,7 @@ class OrderbookBuilder:
                     except Empty:
                         self.__check_snapshot_done()
                     else:
+                        self.__output_perf_data()
                         self.__track_snapshot_load()
                         self.__check_snapshot_done()
 
@@ -388,6 +417,7 @@ class OrderbookBuilder:
                         self.__timed_queue_empty_note()
                         self.__timed_lob_check()
                     else:
+                        self.__output_perf_data()
                         self.__timed_get_queue_stats(track_delay=True)
                         self.__save(timed=True)
 
@@ -397,9 +427,11 @@ class OrderbookBuilder:
                     except JustContinueException:
                         continue
                     except Empty:
+                        self.__output_perf_data()
                         self.__check_finished()
 
                 case "stop":
+                    self.__end_perf_data()
                     self.__save_dataframes(final=True)
                     self.__log_summary()
                     self.__clear_queues_and_exit()
