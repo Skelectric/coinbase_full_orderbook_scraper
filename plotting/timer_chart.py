@@ -25,14 +25,14 @@ class PerformancePlotter:
     def __init__(self, queue: Queue, killer: GracefulKiller = None, title=None, ):
         self.queue = queue
         self.killer = killer
-        self.app = pg.mkQApp("Processing Times")
+        self.app = pg.mkQApp("Processing Speeds")
 
         axis = pg.DateAxisItem(orientation='bottom')
         self.pw = pg.PlotWidget(axisItems={"bottom": axis})
         self.pw.show()
 
         self.pw.addLegend()
-        self.pw.setWindowTitle('pyqtgraph: Processing Times')
+        self.pw.setWindowTitle('pyqtgraph: Processing Speeds')
         self.pw.setLabel('bottom', 'datetime.utcnow', units='seconds')
         self.pw.setLabel('left', 'items per sec')
 

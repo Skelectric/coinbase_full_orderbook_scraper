@@ -36,7 +36,7 @@ class LimitOrderBook:
 
         # stats
         self.items_processed = 0
-        self.tree_size_display_cutoff = 500
+        self.tree_size_display_cutoff = 1000  # nodes
 
     @property
     def empty(self) -> bool:
@@ -190,6 +190,13 @@ class LimitOrderBook:
 
         return bid_levels, ask_levels
 
+    def sorted_levels(self, bids: bool = True):
+        if bids:
+            return {k: self.__bid_levels[k] for k in sorted(self.__bid_levels.keys(), reverse=True)}
+        else:
+            return {k: self.__ask_levels[k] for k in sorted(self.__ask_levels.keys())}
+
+
     @property
     def timestamp(self, datetime_format=False):
         return self.__timestamp
@@ -250,7 +257,7 @@ class LimitOrderBook:
             msg += f"in orderbook.py to display larger trees."
             logger.info(msg)
         else:
-            logger.info(f"{len(self.__bid_levels)} bid levels = {self.__bid_levels}:")
+            logger.info(f"{len(self.__bid_levels)} bid levels = {self.sorted_levels(bids=True)}:")
             self.display_bid_tree()
 
         if len(self.__ask_levels) > self.tree_size_display_cutoff:
@@ -259,7 +266,7 @@ class LimitOrderBook:
             msg += f"in orderbook.py to display larger trees."
             logger.info(msg)
         else:
-            logger.info(f"{len(self.__ask_levels)} ask levels = {self.__ask_levels}:")
+            logger.info(f"{len(self.__ask_levels)} ask levels = {self.sorted_levels(bids=False)}:")
             self.display_ask_tree()
 
         logger.info(f"Items processed by Orderbook: {self.items_processed:,}")

@@ -3,7 +3,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from queue import Queue, Empty
+import queue as q
 import multiprocessing as mp
 from threading import Thread
 from itertools import islice
@@ -25,7 +25,7 @@ class JustContinueException(Exception):
 
 
 class OrderbookSnapshotLoader:
-    def __init__(self, queue: Queue, depth: int = 1000, orderbook_snapshot: dict = None):
+    def __init__(self, queue: q.Queue, depth: int = 1000, orderbook_snapshot: dict = None):
         self.order_count = 0
         self.load_orderbook_snapshot(queue, orderbook_snapshot, depth)
 
@@ -78,16 +78,16 @@ class OrderbookBuilder:
     """Build limit orderbook from msgs in queue"""
     def __init__(
             self,
-            queue: None | Queue = None,
+            queue: q.Queue = None,
             snapshot_order_count: int = 0,
-            output_queue: None | Queue = None,
+            output_queue: mp.Queue = None,
             save_csv: bool = False,
             save_hd5: bool = False,
             output_folder: str = 'data',
-            save_interval: None | int = None,
-            item_display_flags: None | dict = None,
+            save_interval: int = None,
+            item_display_flags: dict = None,
             build_candles: bool = False,
-            load_feed_from_json_file: None | Path = None,
+            load_feed_from_json_file: Path = None,
             store_feed_in_memory: bool = False,
             module_timestamp: str = None,
             module_timer: Timer = None,
@@ -134,7 +134,11 @@ class OrderbookBuilder:
         self.latest_sequence = 0
         self.latest_timestamp = None
         self.queue = queue
+
         self.output_queue = output_queue
+        if self.output_queue is not None:
+            # q.Queue has maxsize, whereas mp.Queue has _maxsize
+            assert hasattr(self.output_queue, '_maxsize')
 
         # queue stats
         self.__timer = Timer()
@@ -233,7 +237,7 @@ class OrderbookBuilder:
             return iter(json.load(f))
 
     @staticmethod
-    def __fill_queue_from_json(in_data: iter, queue: Queue):
+    def __fill_queue_from_json(in_data: iter, queue: q.Queue):
         """Use when LOAD_FEED_FROM_JSON is True to build a queue from iterable."""
         while True:
             item = next(in_data, None)
@@ -378,8 +382,8 @@ class OrderbookBuilder:
                 self.__lob_checked = False
             finally:
                 self.queue.task_done()
-        except Empty as e:
-            raise Empty
+        except q.Empty as e:
+            raise q.Empty
 
     def __process_queue(self) -> None:
         self.__timer.start()
@@ -401,7 +405,7 @@ class OrderbookBuilder:
                         self.__get_and_process_item(output_data=False)
                     except JustContinueException:
                         continue
-                    except Empty:
+                    except q.Empty:
                         self.__check_snapshot_done()
                     else:
                         self.__output_perf_data()
@@ -413,7 +417,7 @@ class OrderbookBuilder:
                         self.__get_and_process_item()
                     except JustContinueException:
                         continue
-                    except Empty:
+                    except q.Empty:
                         self.__timed_queue_empty_note()
                         self.__timed_lob_check()
                     else:
@@ -426,7 +430,7 @@ class OrderbookBuilder:
                         self.__get_and_process_item()
                     except JustContinueException:
                         continue
-                    except Empty:
+                    except q.Empty:
                         self.__output_perf_data()
                         self.__check_finished()
 
@@ -613,7 +617,7 @@ class OrderbookBuilder:
         pass
 
     def output_data(self):
-        if self.output_queue is not None and self.output_queue.qsize() < self.output_queue.maxsize:
+        if self.output_queue is not None and self.output_queue.qsize() < self.output_queue._maxsize:
             timestamp = datetime.strptime(self.lob.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%m/%d/%Y-%H:%M:%S")
             bid_levels, ask_levels = self.lob.levels
             data = {

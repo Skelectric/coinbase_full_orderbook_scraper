@@ -1,15 +1,61 @@
-from queue import Queue, Empty
-
+from tools.GracefulKiller import GracefulKiller
+import multiprocessing as mp
+import queue as q
 import numpy as np
 from loguru import logger
 from tools.timer import Timer
 import threading
 import easygui
+import time
+import ctypes
 
 import matplotlib
 from matplotlib import pyplot as plt
 from matplotlib.backend_bases import NavigationToolbar2, Event
 matplotlib.use('TkAgg')
+
+
+def initialize_plotter(*args, **kwargs):
+    """Needed for multiprocessing."""
+    killer = GracefulKiller(log_exit=False)
+    queue = args[0]
+    title = kwargs.get('title')
+    assert type(queue) == type(mp.Queue()), f"queue is not type Queue: {type(mp.Queue())}"
+    depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
+
+    try:
+        # main depth chart loop, with a reopening prompt
+        reopen_prompt_flag = True
+        while True:
+            if not depth_chart_plotter.closed:
+                depth_chart_plotter.plot_depth_chart()
+            elif reopen_prompt_flag:
+                result = easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
+                if result:
+                    depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
+                else:
+                    reopen_prompt_flag = False
+            else:
+                break
+    # handling Ctrl+C for child processes
+    except InterruptedError as e:
+        # logger.info(f"CTRL+C InterruptedError: {e}")
+        pass
+    except AttributeError as e:
+        # logger.info(f"CTRL+C AttributeError: {e}")
+        pass
+    except KeyboardInterrupt as e:
+        # logger.info(f"CTRL+C KeyboardInterrupt: {e}")
+        pass
+
+# windows only
+def reopen_depth_chart_win32(title, text, style):
+    return ctypes.windll.user32.MessageBoxW(0, text, title, style)
+
+
+def reopen_depth_chart():
+    return easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
+
 
 home = NavigationToolbar2.home
 
@@ -27,7 +73,7 @@ NavigationToolbar2.home = new_home
 
 class DepthChartPlotter:
     # Todo: Build multi-orderbook support
-    def __init__(self, queue: Queue, title=None, ):
+    def __init__(self, queue: mp.Queue, title=None, ):
         self.queue = queue
         self.title = title
         plt.ion()
@@ -85,10 +131,7 @@ class DepthChartPlotter:
         # logger.debug(f"xlim, ylim reset.")
 
     def plot_depth_chart(self):
-        if not self.queue.empty() and not self.paused:
-
-            if self.ax.lines:  # clear previously drawn lines
-                self.ax.cla()
+        if not self.paused:
 
             # get data and plot step functions
             bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = self.get_data()
@@ -98,14 +141,10 @@ class DepthChartPlotter:
             if bid_prices is not None:
                 best_bid = bid_prices[-1]
                 worst_bid = bid_prices[0]
-                self.ax.step(bid_prices, bid_depth, color="green", label="bids")
-                plt.fill_between(bid_prices, bid_depth, facecolor="green", step='pre', alpha=0.2)
 
             if ask_prices is not None:
                 best_ask = ask_prices[0]
                 worst_ask = ask_prices[-1]
-                self.ax.step(ask_prices, ask_depth, color="red", label="asks")
-                plt.fill_between(ask_prices, ask_depth, facecolor="red", step='pre', alpha=0.2)
 
             # operations that require both bids and asks -------------------------------
             # default text
@@ -138,8 +177,6 @@ class DepthChartPlotter:
                 bid_liquidity_txt = f"Amount to move price down {self.move_price_pct:.2%} "
                 bid_liquidity_txt += f"to {price_moved_down:,.2f}: ${bid_liq:,.2f}"
 
-                self.ax.legend(loc='upper right')  # placed here to prevent "No artist" error msg from printing
-
             # calc xlim and ylim ------------------------------------------------------------
 
             max_bid_depth_displayed, max_ask_depth_displayed = None, None
@@ -170,11 +207,25 @@ class DepthChartPlotter:
                 else:
                     y_max = self.ax.ylim_prev[1]
 
-            # finalize xlim and ylim for current draw
+            # final formatting  ---------------------------------------------------------------
+
+            if self.ax.lines:  # clear previously drawn lines
+                self.ax.cla()
+
+            # step functions for bids and asks
+            if bid_prices is not None:
+                self.ax.step(bid_prices, bid_depth, color="green", label="bids")
+                plt.fill_between(bid_prices, bid_depth, facecolor="green", step='pre', alpha=0.2)
+
+            if ask_prices is not None:
+                self.ax.step(ask_prices, ask_depth, color="red", label="asks")
+                plt.fill_between(ask_prices, ask_depth, facecolor="red", step='pre', alpha=0.2)
+
+            if best_bid is not None and best_ask is not None:
+                self.ax.legend(loc='upper right')  # condition prevents "No artist" error msg from printing
+
             self.ax.set_xlim(left=x_min, right=x_max)
             self.ax.set_ylim(bottom=y_min, top=y_max)
-
-            # final text and formatting  -----------------------------------------------------------
 
             self.ax.spines['bottom'].set_position('zero')
 
@@ -210,8 +261,6 @@ class DepthChartPlotter:
 
             self.fig.canvas.flush_events()
 
-            self.queue.task_done()
-
         else:
             # logger.debug(f"Plotting queue is empty or self.pause=True.")
             # time.sleep(1)
@@ -227,14 +276,20 @@ class DepthChartPlotter:
             )
 
     def get_data(self):
-
-        data = self.queue.get()
-        self.timestamp, self.sequence, self.unique_traders, \
-            bid_levels, ask_levels = \
-            data.get("timestamp"), data.get("sequence"), data.get("unique_traders"), \
-            data.get("bid_levels"), data.get("ask_levels")
-
-        return self.transform_data(bid_levels, ask_levels, self.outlier_pct)
+        while True:
+            try:
+                # logger.debug(f"depthchart queue size = {self.queue.qsize()}")
+                data = self.queue.get(timeout=0.1)
+            except q.Empty:
+                # logger.debug(f"Depth chart queue is empty.")
+                plt.pause(0.1)
+                continue
+            else:
+                self.timestamp, self.sequence, self.unique_traders, \
+                    bid_levels, ask_levels = \
+                    data.get("timestamp"), data.get("sequence"), data.get("unique_traders"), \
+                    data.get("bid_levels"), data.get("ask_levels")
+                return self.transform_data(bid_levels, ask_levels, self.outlier_pct)
 
     @staticmethod
     def transform_data(bid_levels, ask_levels, outlier_pct) -> tuple:
