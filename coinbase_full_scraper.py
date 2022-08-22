@@ -24,7 +24,7 @@ from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
 from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
 import plotting.depth_chart_mpl as dpth
-import plotting.timer_chart as perf
+import plotting.performance_chart as perf
 
 
 # ======================================================================================
@@ -46,7 +46,6 @@ LOAD_ORDERBOOK_SNAPSHOT = True
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_CANDLES = False
 PLOT_DEPTH_CHART = True
-PLOT_TIMER_CHART = True
 OUTPUT_FOLDER = 'data'
 
 # for simulating feed
@@ -58,7 +57,10 @@ SAVE_CSV = False
 SAVE_HD5 = False  # Todo: Test this
 SAVE_INTERVAL = 360
 STORE_FEED_IN_MEMORY = False
-TIMER_QUEUE_INTERVAL = 0.01  # output to performance plotter queue every interval seconds
+
+PLOT_PERFORMANCE = True
+PERF_PLOT_INTERVAL = 0.01  # output to performance plotter queue every interval seconds
+PERF_PLOT_WINDOW = 10  # in seconds (approximate)
 
 # ======================================================================================
 # Webhook Parameters
@@ -79,22 +81,25 @@ CHANNELS = ('full',)
 # )
 
 # add console logger with formatting
+logger_format = "<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> "
+logger_format += "--- <level>{level}</level> | Thread {thread} <level>{message}</level>"
 logger.add(
     sys.stdout, level="DEBUG",
-    format="<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> --- <level>{level}</level> | Thread {thread} <level>{message}</level>"
+    format=logger_format,
 )
 
 # ======================================================================================
 
 
-def skip_finish_processing(data_qsize_cutoff: int):
+def skip_finish_processing(_data_qsize_cutoff: int):
     title = "Orderbook Builder wrapping up..."
-    msg = f"More than {data_qsize_cutoff:,} pending items in orderbook queue.\n"
+    msg = f"More than {_data_qsize_cutoff:,} pending items in orderbook queue.\n"
     msg += "Skip remaining items?"
     return easygui.ynbox(msg)
 
 
 if __name__ == '__main__':
+    logger.info("Starting orderbook builder!")
     module_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     module_timer = Timer()
     module_timer.start()
@@ -121,7 +126,7 @@ if __name__ == '__main__':
         depth_chart_queue = mp.Queue(maxsize=1)
         # assert hasattr(depth_chart_queue, "_maxsize")
         args = (depth_chart_queue, )
-        kwargs = {"title": f"Coinbase - {MARKETS[0]}"}
+        kwargs = {"title": f"Coinbase - {MARKETS[0]}", }
         # noinspection PyRedeclaration
         depth_chart_process = mp.Process(
             target=dpth.initialize_plotter,
@@ -133,35 +138,30 @@ if __name__ == '__main__':
         depth_chart_process.start()
 
     # start process speed chart in separate process
-    timer_queue = None
+    perf_plot_queue = None
     perf_plot_process = None
-    if PLOT_TIMER_CHART:
-        timer_queue = mp.Queue()
-        args = (timer_queue, )
+    if PLOT_PERFORMANCE:
+        window = int(PERF_PLOT_WINDOW / PERF_PLOT_INTERVAL)
+        logger.debug(f"Setting performance plot window to {window} points.")
+        # noinspection PyRedeclaration
+        perf_plot_queue = mp.Queue()
+        args = (perf_plot_queue, )
+        kwargs = {"window": window, }
+        # noinspection PyRedeclaration
         perf_plot_process = mp.Process(
             target=perf.initialize_plotter,
             args=args,
+            kwargs=kwargs,
             name="Performance Plotter",
             daemon=True
         )
         perf_plot_process.start()
 
-    # load orderbook snapshot into queue
-    snapshot_order_count = 0
-    if LOAD_ORDERBOOK_SNAPSHOT:
-        orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
-        snapshot_loader = OrderbookSnapshotLoader(
-            queue=data_queue,
-            depth=ORDERBOOK_SNAPSHOT_DEPTH,
-            orderbook_snapshot=orderbook_snapshot
-        )
-        snapshot_order_count = snapshot_loader.order_count
-
     # handle websocket threads
     ws_handler = None
     if not LOAD_FEED_FROM_JSON:
         LOAD_FEED_FROM_JSON_FILEPATH = None
-
+        # noinspection PyRedeclaration
         ws_handler = WebsocketClientHandler()
 
         for i, (market, channel) in enumerate(itertools.product(MARKETS, CHANNELS)):
@@ -175,17 +175,31 @@ if __name__ == '__main__':
                     dump_feed=DUMP_FEED_INTO_JSON,
                     output_folder=OUTPUT_FOLDER,
                     module_timestamp=module_timestamp,
-                    timer_queue=timer_queue,
-                    timer_queue_interval=TIMER_QUEUE_INTERVAL,
+                    timer_queue=perf_plot_queue,
+                    timer_queue_interval=PERF_PLOT_INTERVAL,
                 ),
                 start_immediately=True
             )
 
-    # initialize depth_chart and queue_worker if not webhook-only mode
-    queue_worker = None
-    if not WEBHOOK_ONLY:
+    # Todo: have orderbook builder ignore all sequences before snapshot is complete, when in snapshot mode
 
-        queue_worker = OrderbookBuilder(
+    # load orderbook snapshot into queue
+    snapshot_order_count = 0
+    if LOAD_ORDERBOOK_SNAPSHOT:
+        orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
+        snapshot_loader = OrderbookSnapshotLoader(
+            queue=data_queue,
+            depth=ORDERBOOK_SNAPSHOT_DEPTH,
+            orderbook_snapshot=orderbook_snapshot
+        )
+        # noinspection PyRedeclaration
+        snapshot_order_count = snapshot_loader.order_count
+
+    # initialize depth_chart and queue_worker if not webhook-only mode
+    orderbook_builder = None
+    if not WEBHOOK_ONLY:
+        # noinspection PyRedeclaration
+        orderbook_builder = OrderbookBuilder(
             queue=data_queue,
             snapshot_order_count=snapshot_order_count,
             output_queue=depth_chart_queue,
@@ -199,16 +213,16 @@ if __name__ == '__main__':
             module_timestamp=module_timestamp,
             module_timer=module_timer,
             exchange=EXCHANGE,
-            timer_queue=timer_queue,
-            timer_queue_interval=TIMER_QUEUE_INTERVAL,
+            timer_queue=perf_plot_queue,
+            timer_queue_interval=PERF_PLOT_INTERVAL,
         )
 
-        queue_worker.thread.start()
+        orderbook_builder.thread.start()
 
-        while queue_worker.queue_mode == "snapshot":
+        while orderbook_builder.queue_mode == "snapshot":
             time.sleep(0.1)
             if killer.kill_now:
-                queue_worker.stop()
+                orderbook_builder.stop()
 
         if ws_handler is not None and not ws_handler.start_signal_sent:
             ws_handler.start_all()
@@ -219,7 +233,7 @@ if __name__ == '__main__':
     while not killer.kill_now:
 
         # send kill thread signal if queue worker breaks
-        if queue_worker is not None and not queue_worker.thread.is_alive():
+        if orderbook_builder is not None and not orderbook_builder.thread.is_alive():
             killer.kill_now = True
 
         if ws_handler is not None and not ws_handler.all_threads_alive():
@@ -245,17 +259,17 @@ if __name__ == '__main__':
     if ws_handler is not None:
         ws_handler.kill_all()
 
-    if queue_worker is not None:
-        queue_worker.finish()
+    if orderbook_builder is not None:
+        orderbook_builder.finish()
 
         data_qsize_cutoff = 10000
         if data_queue.qsize() > data_qsize_cutoff:
             result = skip_finish_processing(data_qsize_cutoff)
             if result:
-                queue_worker.stop()
+                orderbook_builder.stop()
 
-        if queue_worker.thread.is_alive():
-            queue_worker.thread.join()
+        if orderbook_builder.thread.is_alive():
+            orderbook_builder.thread.join()
 
         if depth_chart_queue is not None:
             # logger.info(f"Remaining depth_chart queue size: {depth_chart.queue.qsize()}")

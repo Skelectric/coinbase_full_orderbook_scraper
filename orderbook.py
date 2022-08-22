@@ -248,7 +248,7 @@ class LimitOrderBook:
         else:
             logger.warning(f"******Errors encountered******")
             for msg in self.error_msgs:
-                logger.info(msg)
+                logger.warning(msg)
             logger.info('-------------------------------')
 
         if len(self.__bid_levels) > self.tree_size_display_cutoff:

@@ -5,7 +5,7 @@ from itertools import cycle
 from loguru import logger
 
 from tools.timer import Timer
-from tools.GracefulKiller import GracefulKiller
+import signal
 
 import numpy as np
 from collections import deque, defaultdict
@@ -15,16 +15,17 @@ from pyqtgraph.Qt import QtCore, QtGui
 
 
 def initialize_plotter(queue: Queue, *args, **kwargs):
-    """Needed for multiprocessing."""
-    killer = GracefulKiller(log_exit=False)
-    performance_plotter = PerformancePlotter(queue=queue, killer=killer)
+    """Function to initialize and start performance plotter, required for multiprocessing."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    window = kwargs.get("window")
+    performance_plotter = PerformancePlotter(queue=queue, window=window)
     performance_plotter.start()
+    logger.debug(f"Performance plotter started.")
 
 
 class PerformancePlotter:
-    def __init__(self, queue: Queue, killer: GracefulKiller = None, title=None, ):
+    def __init__(self, queue: Queue, window: int = 1000, ):
         self.queue = queue
-        self.killer = killer
         self.app = pg.mkQApp("Processing Speeds")
 
         axis = pg.DateAxisItem(orientation='bottom')
@@ -34,9 +35,9 @@ class PerformancePlotter:
         self.pw.addLegend()
         self.pw.setWindowTitle('pyqtgraph: Processing Speeds')
         self.pw.setLabel('bottom', 'datetime.utcnow', units='seconds')
-        self.pw.setLabel('left', 'items per sec')
+        self.pw.setLabel('left', 'items processed')
 
-        pen_colors = 'b', 'g', 'r', 'c', 'm', 'y', 'k', 'w'
+        pen_colors = 'y', 'm', 'r', 'b', 'g', 'c', 'k', 'w'
         self.pens = cycle(pen_colors)
 
         # self.curve = pg.PlotCurveItem(pen='g')
@@ -46,7 +47,7 @@ class PerformancePlotter:
         self.qtimer = QtCore.QTimer()
 
         # timestamp, counter, pen color
-        self.data = defaultdict(lambda: [deque(maxlen=300), deque(maxlen=300), None])
+        self.data = defaultdict(lambda: [deque(maxlen=window), deque(maxlen=window), None])
 
         self.timer = Timer()
 
@@ -56,14 +57,11 @@ class PerformancePlotter:
         pg.exec()
 
     def close(self):
-        self.pw.close()
+        self.app.close()
 
     def display(self):
 
         try:
-
-            if self.killer.kill_now:
-                self.close()
 
             self.pw.clear()
             self.update()
@@ -72,34 +70,36 @@ class PerformancePlotter:
             if self.fps is None:
                 self.fps = 1.0 / delta
             else:
-                s = np.clip(delta * 3., 0, 1)  # todo: figure out what this is doing
+                s = np.clip(delta * 3., 0, 1)  # todo: figure out how this works
                 self.fps = self.fps * (1 - s) + (1.0 / delta) * s
             self.pw.setTitle(f"{self.fps:.2f} fps")
 
         # handling Ctrl+C for child processes
         except InterruptedError as e:
-            # logger.info(f"CTRL+C InterruptedError: {e}")
+            logger.info(f"CTRL+C InterruptedError: {e}")
             pass
         except AttributeError as e:
-            # logger.info(f"CTRL+C AttributeError: {e}")
+            logger.info(f"CTRL+C AttributeError: {e}")
             pass
         except KeyboardInterrupt as e:
-            # logger.info(f"CTRL+C KeyboardInterrupt: {e}")
+            logger.info(f"CTRL+C KeyboardInterrupt: {e}")
             pass
 
     def update(self):
-        self.update_arrays()
 
-        for process in self.data.keys():
-            x = np.array(self.data[process][0])
-            y = np.array(self.data[process][1])
-            x_bounds = x[0] - 0.5, x[-1] + 0.5
-            y_bounds = 0, max(y) * 1.1
-            # logger.debug(f"x = {x}, y = {y}")
-            item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process][2], name=process)
-            # self.curve.setData(x=x, y=y)
-            self.pw.setRange(xRange=x_bounds, yRange=y_bounds)
-            self.pw.addItem(item)
+        try:
+            self.update_arrays()
+            for process in self.data.keys():
+                x = np.array(self.data[process][0])
+                y = np.array(self.data[process][1])
+                # logger.debug(f"x = {x}, y = {y}")
+                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process][2], name=process)
+                # self.curve.setData(x=x, y=y)
+                self.pw.addItem(item)
+
+        except KeyboardInterrupt as e:
+            logger.info(f"CTRL+C KeyboardInterrupt: {e}")
+            pass
 
     def update_arrays(self):
         timestamp, process, delta = self.get_data()

@@ -130,7 +130,7 @@ class WebsocketClient:
                 "websocket_thread_loop",
                 self.counter,
             )
-            self.counter = 0
+            # self.counter = 0
             self.timer_queue.put(item)
 
     @run_once
@@ -218,7 +218,7 @@ class WebsocketClientHandler:
                 if not self.websocket_clients[i].running:
                     # logger.debug(f"{self.websocket_clients[i].id} has stopped running.")
                     self.websocket_clients.remove(self.websocket_clients[i])
-                    logger.info(f"{len(self.get_active)} thread(s) remaining.")
+                    logger.info(f"{len(self.get_active)} websocket thread(s) remaining.")
                 else:
                     logger.info(f"{self.websocket_clients[i].id} is still running.")
                     i += 1
