@@ -80,8 +80,6 @@ class WebsocketClient:
         feed = None
         while not self.kill and threading.main_thread().is_alive():
 
-            self.__output_perf_data()
-
             try:
                 feed = self.ws.recv()
                 if feed:
@@ -99,6 +97,8 @@ class WebsocketClient:
                         json_msgs.append(msg)
 
                     self.process_msg(msg)
+
+                    self.__output_perf_data()
 
                 else:
                     logger.warning("Webhook message is empty!")

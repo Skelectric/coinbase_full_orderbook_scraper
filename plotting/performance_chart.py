@@ -1,3 +1,4 @@
+import time
 from multiprocessing import Queue
 from queue import Empty
 from itertools import cycle
@@ -19,8 +20,8 @@ def initialize_plotter(queue: Queue, *args, **kwargs):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     window = kwargs.get("window")
     performance_plotter = PerformancePlotter(queue=queue, window=window)
+    logger.debug(f"Performance plotter starting...")
     performance_plotter.start()
-    logger.debug(f"Performance plotter started.")
 
 
 class PerformancePlotter:
@@ -40,14 +41,20 @@ class PerformancePlotter:
         pen_colors = 'y', 'm', 'r', 'b', 'g', 'c', 'k', 'w'
         self.pens = cycle(pen_colors)
 
-        # self.curve = pg.PlotCurveItem(pen='g')
-        # self.pw.addItem(self.curve)
-
         self.fps = None
         self.qtimer = QtCore.QTimer()
 
         # timestamp, counter, pen color
-        self.data = defaultdict(lambda: [deque(maxlen=window), deque(maxlen=window), None])
+        # deque implementation
+        # self.data = defaultdict(lambda: [deque(maxlen=window), deque(maxlen=window), None])
+        # numpy implementation
+        self.data = defaultdict(
+            lambda: [
+                np.zeros(window, dtype=np.float),
+                np.zeros(window, dtype=np.int),
+                None
+            ]
+        )
 
         self.timer = Timer()
 
@@ -85,42 +92,60 @@ class PerformancePlotter:
             logger.info(f"CTRL+C KeyboardInterrupt: {e}")
             pass
 
-    def update(self):
+    def update(self) -> None:
 
         try:
             self.update_arrays()
+
+            # self.timer.reset()
             for process in self.data.keys():
-                x = np.array(self.data[process][0])
-                y = np.array(self.data[process][1])
-                # logger.debug(f"x = {x}, y = {y}")
-                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process][2], name=process)
-                # self.curve.setData(x=x, y=y)
+
+                # deque implementation
+                # x = np.array(self.data[process][0])
+                # y = np.array(self.data[process][1])
+
+                # numpy implementation
+                x = self.data[process][0]
+                x = x[x != 0]
+                y = self.data[process][1]
+                y = y[y != 0]
+
+                pen = self.data[process][2]
+                item = pg.PlotCurveItem(x=x, y=y, pen=pen, name=process)
                 self.pw.addItem(item)
+
+            # print(self.timer.lap())
 
         except KeyboardInterrupt as e:
             logger.info(f"CTRL+C KeyboardInterrupt: {e}")
             pass
 
-    def update_arrays(self):
-        timestamp, process, delta = self.get_data()
+    def update_arrays(self) -> None:
+        timestamp, process, counter = self.get_data()
 
         try:
             assert isinstance(timestamp, float), f"timestamp '{timestamp}' is type {type(timestamp)}"
             assert isinstance(process, str), f"process '{process}' is type {type(process)}"
-            assert isinstance(delta, int) or delta == 'done', f"delta '{delta}' is type {type(delta)}"
+            assert isinstance(counter, int) or counter == 'done', f"counter '{counter}' is type {type(counter)}"
         except AssertionError as e:
             logger.debug(f"AssertionError: {e}")
         else:
-            if delta == "done":
+            if counter == "done":
                 logger.debug(f"Process {process} has ended output to performance plotter queue.")
                 self.remove_process(process)
             else:
-                self.data[process][0].append(timestamp)
-                self.data[process][1].append(delta)
+                # deque implementation
+                # self.data[process][0].append(timestamp)
+                # self.data[process][1].append(counter)
+
+                # numpy implementation
+                self.np_append(self.data[process][0], timestamp)
+                self.np_append(self.data[process][1], counter)
+
                 if self.data[process][2] is None:  # set line color only once per process
                     self.data[process][2] = next(self.pens)
 
-    def get_data(self):
+    def get_data(self) -> tuple:
         # logger.debug(f"getting data")
         while True:
             try:
@@ -132,6 +157,12 @@ class PerformancePlotter:
                 # logger.debug(f"Got item {item}")
                 return item
 
-    def remove_process(self, process: str):
+    def remove_process(self, process: str) -> None:
         if process in self.data.keys():
             self.data.pop(process)
+
+    @staticmethod
+    def np_append(np_array, item) -> None:
+        """Append to a numpy array and rotate as if it's a deque."""
+        np_array[:-1] = np_array[1:]  # shift all elements left 1 step
+        np_array[-1] = item  # place item into last element
