@@ -43,10 +43,6 @@ ITEM_DISPLAY_FLAGS = {
     "change": False
 }
 LOAD_ORDERBOOK_SNAPSHOT = True
-# Snapshot tends to provide a sequence earlier than where websocket starts
-SNAPSHOT_GET_DELAY = 0.75  # in seconds.
-
-
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_CANDLES = False
 PLOT_DEPTH_CHART = True
@@ -64,7 +60,7 @@ STORE_FEED_IN_MEMORY = False
 
 PLOT_PERFORMANCE = True
 PERF_PLOT_INTERVAL = 0.01  # output to performance plotter queue every interval seconds
-PERF_PLOT_WINDOW = 10.  # in seconds (approximate)
+PERF_PLOT_WINDOW = 10  # in seconds (approximate)
 
 # ======================================================================================
 # Webhook Parameters
@@ -146,7 +142,7 @@ if __name__ == '__main__':
     perf_plot_process = None
     if PLOT_PERFORMANCE:
         window = int(PERF_PLOT_WINDOW / PERF_PLOT_INTERVAL)
-        logger.debug(f"Setting performance plot window to {window} measurements...")
+        logger.debug(f"Setting performance plot window to {window} points.")
         # noinspection PyRedeclaration
         perf_plot_queue = mp.Queue()
         args = (perf_plot_queue, )
@@ -190,9 +186,6 @@ if __name__ == '__main__':
     # load orderbook snapshot into queue
     snapshot_order_count = 0
     if LOAD_ORDERBOOK_SNAPSHOT:
-        if SNAPSHOT_GET_DELAY != 0:
-            logger.debug(f"Delaying orderbook snapshot request by {SNAPSHOT_GET_DELAY} seconds...")
-            time.sleep(SNAPSHOT_GET_DELAY)
         orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
         snapshot_loader = OrderbookSnapshotLoader(
             queue=data_queue,

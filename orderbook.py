@@ -32,7 +32,7 @@ class LimitOrderBook:
 
         self.__timestamp = None
 
-        self.error_msgs = set()  # includes check failures
+        self.error_msgs = set()
 
         # stats
         self.items_processed = 0
@@ -243,8 +243,8 @@ class LimitOrderBook:
             logger.info(self.error_msgs)
 
     def log_details(self):
-        if len(self.error_msgs) == 0:
-            logger.info(f"No validation check failures encountered.")
+        if self.error_msgs is not set():
+            logger.info(f"No errors encountered.")
         else:
             logger.warning(f"******Errors encountered******")
             for msg in self.error_msgs:

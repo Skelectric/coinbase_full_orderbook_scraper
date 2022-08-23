@@ -22,7 +22,6 @@ def initialize_plotter(*args, **kwargs):
     title = kwargs.get('title')
     assert type(queue) == type(mp.Queue()), f"queue is not type Queue: {type(mp.Queue())}"
     depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
-    logger.debug(f"Depth Chart plotter starting...")
 
     try:
         # main depth chart loop, with a reopening prompt
@@ -107,6 +106,8 @@ class DepthChartPlotter:
 
         self.ax.xlim_prev = None
         self.ax.ylim_prev = None
+
+        logger.debug("DepthChartPlotter initialized.")
 
     def on_close(self, event):
         # logger.debug(f"Figure closed.")
