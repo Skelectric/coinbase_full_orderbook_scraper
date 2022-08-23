@@ -27,7 +27,7 @@ def run_once_per_interval(interval_attribute):
                 assert isinstance(interval_attribute, (int, float)), msg
                 interval = interval_attribute
             # if first call, start timer and run function
-            if wrapper.timer.start_time is None:
+            if wrapper.timer.get_start_time() is None:
                 wrapper.timer.start()
                 return method(*args, **kwargs)
             # for subsequent, check timer and run function if interval of time has passed

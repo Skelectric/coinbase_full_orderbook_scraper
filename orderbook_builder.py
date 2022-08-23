@@ -1,6 +1,6 @@
 import json
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 import queue as q
@@ -17,6 +17,8 @@ from tools.helper_tools import s_print
 from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval, run_once
 from worker_dataframes import MatchDataFrame, CandleDataFrame
+
+import numpy as np
 
 
 class JustContinueException(Exception):
@@ -93,11 +95,10 @@ class OrderbookBuilder:
             build_candles: bool = False,
             load_feed_from_json_file: Path = None,
             store_feed_in_memory: bool = False,
-            module_timestamp: str = None,
             module_timer: Timer = None,
             exchange: str = "Coinbase",
-            timer_queue: mp.Queue = None,
-            timer_queue_interval: float = None,
+            stats_queue: mp.Queue = None,
+            stats_queue_interval: float = None,
     ):
         # queue worker options
         self.__market = None
@@ -131,6 +132,7 @@ class OrderbookBuilder:
 
         # data structures
         self.lob = LimitOrderBook()
+        module_timestamp = self.module_timer.get_start_time(_format="datetime").strftime("%Y%m%d-%H%M%S")
         self.matches = MatchDataFrame(exchange="Coinbase", timestamp=module_timestamp)
         self.candles = None
         if build_candles:
@@ -159,7 +161,6 @@ class OrderbookBuilder:
         self.__queue_stats = defaultdict(list)
         self.__total_queue_items_processed = 0
         self.__total_queue_items_skipped = 0
-        self.__queue_items_processed = 0
         self.__prev_qsize = 0
         self.__last_timestamp = datetime.utcnow()
 
@@ -194,35 +195,11 @@ class OrderbookBuilder:
             self.__fill_queue_from_json(in_data, self.queue)
 
         # performance monitoring
-        self.__counter = 0
-        self.timer = Timer()
-        self.timer_queue = timer_queue
-        self.timer_queue_interval = timer_queue_interval
-
-    @run_once_per_interval("timer_queue_interval")
-    def __output_perf_data(self) -> None:
-        """feed output data to performance plotter. runs once every timer_queue_interval"""
-        if self.timer_queue is not None:
-            # Todo: add more stats
-            # delta = self.timer.delta()
-            item = (
-                datetime.utcnow().timestamp(),
-                "orderbook_build_loop",
-                self.__counter,
-            )
-            # self.__counter = 0
-            self.timer_queue.put(item)
-
-    @run_once
-    def __end_perf_data(self):
-        """signal to performance data reader that feed is over. can only run once"""
-        if self.timer_queue is not None:
-            item = (
-                datetime.utcnow().timestamp(),
-                "orderbook_build_loop",
-                "done"
-            )
-            self.timer_queue.put(item)
+        self.total_count = 0
+        self.count = 0
+        self.delays = deque()
+        self.stats_queue = stats_queue
+        self.stats_queue_interval = stats_queue_interval
 
     def __next_queue_mode(self):
         self.queue_mode = next(self.__queue_modes_cycle)
@@ -296,10 +273,9 @@ class OrderbookBuilder:
         delta = datetime.utcnow() - self.__last_timestamp
         # logger.debug(delta.total_seconds())
         if delta.total_seconds() > 0.1:
-            dones_per_sec = self.__queue_items_processed // delta.total_seconds()
+            dones_per_sec = self.count // delta.total_seconds()
             logger.info(f"Items processed per second = {dones_per_sec:,}")
             self.__last_timestamp = datetime.utcnow()
-            self.__queue_items_processed = 0
 
     @run_once_per_interval("_queue_stats_interval")
     def __timed_get_queue_stats(self, *args, **kwargs):
@@ -312,7 +288,7 @@ class OrderbookBuilder:
     def __save_dataframes(self, final: bool = False) -> None:
         if not (self.__save_CSV or self.__save_HD5):
             return
-        logger.info(f"Saving dataframes. Time elapsed: {self.module_timer.elapsed(hms_format=True)}")
+        logger.info(f"Saving dataframes. Time elapsed: {self.module_timer.elapsed(_format='hms')}")
 
         if isinstance(self.matches, MatchDataFrame) and not self.matches.is_empty:
             self.matches.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
@@ -428,8 +404,7 @@ class OrderbookBuilder:
                 raise JustContinueException
 
             self.__process_item(item, *args, **kwargs)
-            self.__counter += 1
-            self.__queue_items_processed += 1  # todo: deprecate
+            self.__track_perf_data()
             self.__lob_checked = False
             self.queue.task_done()
 
@@ -511,6 +486,9 @@ class OrderbookBuilder:
             item.get("old_size"), item.get("new_size"), \
             item.get("price"), item.get("time"), item.get("client_oid")
 
+        self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ") \
+            if timestamp is not None else datetime.utcnow()
+
         is_bid = True if side == "buy" else False
 
         if self.first_sequence is None and sequence is not None:
@@ -536,10 +514,6 @@ class OrderbookBuilder:
             # check for missing sequences
             if self.prev_sequence is not None and self.sequence != self.prev_sequence + 1:
                 self.__check_missing_sequences(self.prev_sequence, self.sequence)
-
-            # todo: check if this is the best place for this
-            self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ") \
-                if timestamp is not None else datetime.utcnow()
 
         match item_type:
             case "snapshot":
@@ -683,6 +657,43 @@ class OrderbookBuilder:
             # logger.debug(f"PLACING item {self.output_item_counter}: ask_levels {ask_levels}")
             self.output_queue.put(data)
 
+    def __track_perf_data(self):
+        # if self.latest_timestamp is not None:
+        delay = max(datetime.utcnow().timestamp() - self.latest_timestamp.timestamp(), 0)
+        self.delays.append(delay)
+        self.count += 1
+        self.total_count += 1
+
+    @run_once_per_interval("stats_queue_interval")
+    def __output_perf_data(self):
+
+        if self.stats_queue is not None:
+            item = {
+                "process": "orderbook_builder_thread_loop",
+                "timestamp": datetime.utcnow().timestamp(),
+                "elapsed": self.module_timer.elapsed(),
+                "data": {
+                    "total": self.total_count,
+                    "count": self.count,
+                    "avg delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
+                },
+            }
+            self.stats_queue.put(item)
+
+            self.count = 0
+            self.delays = deque()
+
+    @run_once
+    def __end_perf_data(self):
+        """signal to performance data reader that feed is over. can only run once"""
+        if self.stats_queue is not None:
+            item = (
+                datetime.utcnow().timestamp(),
+                "orderbook_build_loop",
+                "done"
+            )
+            self.stats_queue.put(item)
+
     def display_subscription(self, item: dict):
         assert len(item.get("channels")) == 1
         assert len(item["channels"][0]["product_ids"]) == 1
@@ -705,7 +716,7 @@ class OrderbookBuilder:
             average_timedelta = sum(self.__queue_stats["delta"], timedelta(0)) / len(self.__queue_stats["delta"])
             logger.info(f"Average webhook-processing delay = {average_timedelta}")
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
-            logger.info(f"Total items processed from queue = {self.__counter:,}")
+            logger.info(f"Total items processed from queue = {self.total_count:,}")
 
         if len(self.missing_sequences) != 0:
             logger.warning(f"{len(self.missing_sequences)} missing sequences.")

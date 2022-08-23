@@ -6,7 +6,9 @@ import multiprocessing as mp
 import queue
 from threading import Thread
 from websocket import create_connection, WebSocketConnectionClosedException
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import deque
+import numpy as np
 
 # third party modules
 from loguru import logger
@@ -16,6 +18,7 @@ from api_coinbase import CoinbaseAPI
 from tools.helper_tools import s_print
 from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval, run_once
+
 
 class WebsocketClient:
     def __init__(
@@ -27,9 +30,9 @@ class WebsocketClient:
             endpoint: str = None,
             dump_feed: bool = False,
             output_folder: str = None,
-            module_timestamp: str = None,
-            timer_queue: mp.Queue = None,
-            timer_queue_interval: float = None,
+            module_timer: Timer = None,
+            stats_queue: mp.Queue = None,
+            stats_queue_interval: float = None,
 
     ) -> None:
         self.channel = channel
@@ -45,13 +48,15 @@ class WebsocketClient:
         self.kill = False
         self.dump_feed = dump_feed
         self.output_folder = output_folder
-        self.module_timestamp = module_timestamp
+        self.module_timer = module_timer
 
         # performance monitoring
-        self.counter = 0
-        self.timer = Timer()
-        self.timer_queue = timer_queue
-        self.timer_queue_interval = timer_queue_interval
+        self.latest_timestamp = None
+        self.total_count = 0
+        self.count = 0  # reset every timer_queue_interval
+        self.delays = deque()
+        self.stats_queue = stats_queue
+        self.stats_queue_interval = stats_queue_interval
 
     def websocket_thread(self) -> None:
         self.ws = create_connection(self.ws_url)
@@ -72,7 +77,8 @@ class WebsocketClient:
         # For local testing
         if self.dump_feed:
             json_msgs = []
-            json_filename = f"coinbase_{self.channel}_{self.market}_dump_{self.module_timestamp}.json"
+            module_timestamp = self.module_timer.get_start_time(_format="datetime").strftime("%Y%m%d-%H%M%S")
+            json_filename = f"coinbase_{self.channel}_{self.market}_dump_{module_timestamp}.json"
             json_filepath = Path.cwd() / self.output_folder / json_filename
 
         self.running = True
@@ -121,31 +127,52 @@ class WebsocketClient:
 
         self.running = False
 
-    @run_once_per_interval("timer_queue_interval")
+    def __track_perf_data(self):
+        # if self.latest_timestamp is not None:
+        delay = max(datetime.utcnow().timestamp() - self.latest_timestamp.timestamp(), 0)
+        self.delays.append(delay)
+        self.count += 1
+        self.total_count += 1
+
+    @run_once_per_interval("stats_queue_interval")
     def __output_perf_data(self):
-        if self.timer_queue is not None:
-            # delta = self.timer.delta()
-            item = (
-                datetime.utcnow().timestamp(),
-                "websocket_thread_loop",
-                self.counter,
-            )
-            # self.counter = 0
-            self.timer_queue.put(item)
+
+        if self.stats_queue is not None:
+            item = {
+                "process": "websocket_thread_loop",
+                "timestamp": datetime.utcnow().timestamp(),
+                "elapsed": self.module_timer.elapsed(),
+                "data": {
+                    "total": self.total_count,
+                    "count": self.count,
+                    "avg delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
+                },
+            }
+            self.stats_queue.put(item)
+
+            self.count = 0
+            self.delays = deque()
 
     @run_once
     def __end_perf_data(self):
-        if self.timer_queue is not None:
-            item = (
-                datetime.utcnow().timestamp(),
-                "websocket_thread_loop",
-                "done"
-            )
-            self.timer_queue.put(item)
+        if self.stats_queue is not None:
+            item = {
+                "process": "websocket_thread_loop",
+                "timestamp": datetime.utcnow().timestamp(),
+                "elapsed": self.module_timer.elapsed(),
+                "data": "done",
+            }
+            self.stats_queue.put(item)
 
     def process_msg(self, msg: dict):
+        timestamp = msg.get("time")
+        if timestamp is not None:
+            self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+        else:
+            self.latest_timestamp = datetime.utcnow()
+
+        self.__track_perf_data()
         self.data_queue.put(msg)
-        self.counter += 1
         return None
 
     def start_thread(self) -> None:

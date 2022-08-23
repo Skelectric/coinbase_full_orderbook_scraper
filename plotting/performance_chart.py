@@ -29,6 +29,7 @@ class PerformancePlotter:
         self.app = pg.mkQApp("Processing Speeds")
 
         axis = pg.DateAxisItem(orientation='bottom')
+
         self.pw = pg.PlotWidget(axisItems={"bottom": axis})
         self.pw.show()
 
@@ -46,10 +47,19 @@ class PerformancePlotter:
         self.fps = None
         self.qtimer = QtCore.QTimer()
 
-        # timestamp, counter, pen color
-        self.data = defaultdict(lambda: [deque(maxlen=window), deque(maxlen=window), None])
+        self.data = defaultdict(
+            lambda: {
+                "timestamp": deque(maxlen=window),
+                "elapsed": deque(maxlen=window),
+                "data": defaultdict(
+                    lambda: deque(maxlen=window)
+                ),
+                "pen": None
+            }
+        )
 
         self.timer = Timer()
+        self.timer.start()
 
     def start(self):
         self.qtimer.timeout.connect(self.display)
@@ -85,16 +95,25 @@ class PerformancePlotter:
             logger.info(f"CTRL+C KeyboardInterrupt: {e}")
             pass
 
+    def update_total(self):
+        pass
+
+    def update_count(self):
+        pass
+
+    def update_delay(self):
+        pass
+
     def update(self):
 
         try:
             self.update_arrays()
+
             for process in self.data.keys():
-                x = np.array(self.data[process][0])
-                y = np.array(self.data[process][1])
+                x = np.array(self.data[process]["timestamp"])
+                y = np.array(self.data[process]["data"]["count"])
                 # logger.debug(f"x = {x}, y = {y}")
-                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process][2], name=process)
-                # self.curve.setData(x=x, y=y)
+                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
                 self.pw.addItem(item)
 
         except KeyboardInterrupt as e:
@@ -102,34 +121,31 @@ class PerformancePlotter:
             pass
 
     def update_arrays(self):
-        timestamp, process, delta = self.get_data()
+        item = self.get_data()
+        process, timestamp, elapsed, data = \
+            item.get("process"), item.get("timestamp"), item.get("elapsed"), item.get("data")
 
-        try:
-            assert isinstance(timestamp, float), f"timestamp '{timestamp}' is type {type(timestamp)}"
-            assert isinstance(process, str), f"process '{process}' is type {type(process)}"
-            assert isinstance(delta, int) or delta == 'done', f"delta '{delta}' is type {type(delta)}"
-        except AssertionError as e:
-            logger.debug(f"AssertionError: {e}")
+        if data == "done":
+            logger.debug(f"Process {process} has ended output to performance plotter queue.")
+            self.remove_process(process)
+
         else:
-            if delta == "done":
-                logger.debug(f"Process {process} has ended output to performance plotter queue.")
-                self.remove_process(process)
-            else:
-                self.data[process][0].append(timestamp)
-                self.data[process][1].append(delta)
-                if self.data[process][2] is None:  # set line color only once per process
-                    self.data[process][2] = next(self.pens)
+            self.data[process]["timestamp"].append(timestamp)
+            self.data[process]["elapsed"].append(elapsed)
+
+            for k, v in data.items():
+                self.data[process]["data"][k].append(v)
+
+            if self.data[process]["pen"] is None:  # set line color only once per process
+                self.data[process]["pen"] = next(self.pens)
 
     def get_data(self):
-        # logger.debug(f"getting data")
         while True:
             try:
                 item = self.queue.get()
             except Empty:
-                # logger.debug(f"empty")
                 continue
             else:
-                # logger.debug(f"Got item {item}")
                 return item
 
     def remove_process(self, process: str):

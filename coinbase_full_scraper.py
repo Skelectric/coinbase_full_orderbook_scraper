@@ -45,7 +45,7 @@ ITEM_DISPLAY_FLAGS = {
 LOAD_ORDERBOOK_SNAPSHOT = True
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_CANDLES = False
-PLOT_DEPTH_CHART = True
+PLOT_DEPTH_CHART = False
 OUTPUT_FOLDER = 'data'
 
 # for simulating feed
@@ -100,9 +100,9 @@ def skip_finish_processing(_data_qsize_cutoff: int):
 
 if __name__ == '__main__':
     logger.info("Starting orderbook builder!")
-    module_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     module_timer = Timer()
     module_timer.start()
+    module_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     killer = GracefulKiller()
 
     cb_api = CoinbaseAPI()  # used for authenticated websocket
@@ -174,9 +174,9 @@ if __name__ == '__main__':
                     endpoint=ENDPOINT,
                     dump_feed=DUMP_FEED_INTO_JSON,
                     output_folder=OUTPUT_FOLDER,
-                    module_timestamp=module_timestamp,
-                    timer_queue=perf_plot_queue,
-                    timer_queue_interval=PERF_PLOT_INTERVAL,
+                    module_timer=module_timer,
+                    stats_queue=perf_plot_queue,
+                    stats_queue_interval=PERF_PLOT_INTERVAL,
                 ),
                 start_immediately=True
             )
@@ -185,15 +185,16 @@ if __name__ == '__main__':
 
     # load orderbook snapshot into queue
     snapshot_order_count = 0
-    if LOAD_ORDERBOOK_SNAPSHOT:
-        orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
-        snapshot_loader = OrderbookSnapshotLoader(
-            queue=data_queue,
-            depth=ORDERBOOK_SNAPSHOT_DEPTH,
-            orderbook_snapshot=orderbook_snapshot
-        )
-        # noinspection PyRedeclaration
-        snapshot_order_count = snapshot_loader.order_count
+    if not WEBHOOK_ONLY:
+        if LOAD_ORDERBOOK_SNAPSHOT:
+            orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
+            snapshot_loader = OrderbookSnapshotLoader(
+                queue=data_queue,
+                depth=ORDERBOOK_SNAPSHOT_DEPTH,
+                orderbook_snapshot=orderbook_snapshot
+            )
+            # noinspection PyRedeclaration
+            snapshot_order_count = snapshot_loader.order_count
 
     # initialize depth_chart and queue_worker if not webhook-only mode
     orderbook_builder = None
@@ -210,11 +211,10 @@ if __name__ == '__main__':
             build_candles=BUILD_CANDLES,
             load_feed_from_json_file=LOAD_FEED_FROM_JSON_FILEPATH,
             store_feed_in_memory=STORE_FEED_IN_MEMORY,
-            module_timestamp=module_timestamp,
             module_timer=module_timer,
             exchange=EXCHANGE,
-            timer_queue=perf_plot_queue,
-            timer_queue_interval=PERF_PLOT_INTERVAL,
+            stats_queue=perf_plot_queue,
+            stats_queue_interval=PERF_PLOT_INTERVAL,
         )
 
         orderbook_builder.thread.start()
@@ -284,4 +284,4 @@ if __name__ == '__main__':
             data_queue.queue.clear()
             logger.info(f"Queues cleared.")
 
-    logger.info(f"Elapsed time = {module_timer.elapsed(hms_format=True)}")
+    logger.info(f"Elapsed time = {module_timer.elapsed(_format='hms')}")
