@@ -26,7 +26,6 @@ from tools.timer import Timer
 import plotting.depth_chart_mpl as dpth
 import plotting.performance_chart as perf
 
-
 # ======================================================================================
 # Script Parameters
 
@@ -45,7 +44,7 @@ ITEM_DISPLAY_FLAGS = {
 LOAD_ORDERBOOK_SNAPSHOT = True
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_CANDLES = False
-PLOT_DEPTH_CHART = False
+PLOT_DEPTH_CHART = True
 OUTPUT_FOLDER = 'data'
 
 # for simulating feed
@@ -60,7 +59,7 @@ STORE_FEED_IN_MEMORY = False
 
 PLOT_PERFORMANCE = True
 PERF_PLOT_INTERVAL = 0.01  # output to performance plotter queue every interval seconds
-PERF_PLOT_WINDOW = 10  # in seconds (approximate)
+PERF_PLOT_WINDOW = 5  # in seconds (approximate)
 
 # ======================================================================================
 # Webhook Parameters
@@ -95,7 +94,7 @@ def skip_finish_processing(_data_qsize_cutoff: int):
     title = "Orderbook Builder wrapping up..."
     msg = f"More than {_data_qsize_cutoff:,} pending items in orderbook queue.\n"
     msg += "Skip remaining items?"
-    return easygui.ynbox(msg)
+    return easygui.ynbox(msg, title)
 
 
 if __name__ == '__main__':
@@ -114,9 +113,9 @@ if __name__ == '__main__':
     # main queue between websocket client and orderbook builder
     data_queue = queue.Queue()
 
-    # multiprocessing manager Todo: figure out what this does
-    process_mgr = mp.Manager()
-    mgr_list = process_mgr.list()
+    # multiprocessing manager
+    # process_mgr = mp.Manager()
+    # mgr_list = process_mgr.list()
 
     # start depth chart in separate process
     depth_chart_queue = None
@@ -242,20 +241,6 @@ if __name__ == '__main__':
 
         time.sleep(1)
 
-    # wait for depth chart to stop
-    if depth_chart_process is not None:
-        # depth_chart_process.join(1)
-        # logger.debug("Depth chart process joined.")
-        depth_chart_process.terminate()
-        logger.debug("Depth chart process terminated.")
-
-    # wait for time chart to stop
-    if perf_plot_process is not None:
-        # perf_plot_process.join(1)
-        # logger.debug("Performance plot process joined.")
-        perf_plot_process.terminate()
-        logger.debug("Performance plot process terminated.")
-
     if ws_handler is not None:
         ws_handler.kill_all()
 
@@ -271,17 +256,39 @@ if __name__ == '__main__':
         if orderbook_builder.thread.is_alive():
             orderbook_builder.thread.join()
 
-        if depth_chart_queue is not None:
-            # logger.info(f"Remaining depth_chart queue size: {depth_chart.queue.qsize()}")
-            # logger.debug(f"Clearing depth_chart_queue...")
-            while not depth_chart_queue.empty():
-                depth_chart_queue.get()
-            # logger.debug(f"depth_chart_queue cleared.")
+        # wait for depth chart process to stop
+        if depth_chart_process is not None:
+            logger.debug(f"Joining depth chart plot process...")
+            depth_chart_process.join()
+            logger.debug("Depth chart process joined.")
+            # if depth_chart_process.is_alive():
+            #     depth_chart_process.terminate()
+            #     logger.debug("Depth chart process terminated.")
 
         logger.info(f"Remaining data queue size: {data_queue.qsize()}")
         if data_queue.qsize() != 0:
-            logger.warning("Queue worker did not finish processing the queue! Clearing all queues now...")
+            logger.warning("Orderbook builder did not finish processing the queue! Clearing all queues now...")
             data_queue.queue.clear()
             logger.info(f"Queues cleared.")
+
+    # wait for stats chart process to stop
+    if perf_plot_process is not None:
+        logger.debug(f"Joining performance plot process...")
+        perf_plot_process.join()
+        logger.debug("Performance plot process joined.")
+        # if perf_plot_process.is_alive():
+        #     perf_plot_process.terminate()
+        #     logger.debug("Performance plot process terminated.")
+
+    # if performance plot or depth chart closed before main process,
+    # script will hang at end because of QueueFeederThreads, so need to clear queues again.
+    while not perf_plot_queue.empty():
+        perf_plot_queue.get()
+    while not depth_chart_queue.empty():
+        depth_chart_queue.get()
+    depth_chart_queue.close()
+
+    # logger.debug(f"perf_plot_queue.qsize() = {perf_plot_queue.qsize()}")
+    # logger.debug(f"depth_chart_queue.qsize() = {depth_chart_queue.qsize()}")
 
     logger.info(f"Elapsed time = {module_timer.elapsed(_format='hms')}")

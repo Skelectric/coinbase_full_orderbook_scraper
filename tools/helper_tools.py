@@ -1,7 +1,11 @@
 import json
+import threading
+
 from loguru import logger
 from urllib import parse
 from threading import Lock
+
+from tools.run_once_per_interval import run_once_per_interval
 
 
 def save_json(filename, d):
@@ -80,3 +84,16 @@ def class_user_interface(class_instance):
         else:
             method = getattr(class_instance, method_list[user_action])
             method(params)
+
+
+def log_active_threads():
+    interval = 20  # seconds
+
+    @run_once_per_interval(interval)
+    def _log_active_threads():
+        logger.debug(f"Active threads:")
+        for thread in threading.enumerate():
+            logger.debug(thread.name)
+        logger.debug(f"...")
+
+    _log_active_threads()

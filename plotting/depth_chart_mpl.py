@@ -1,4 +1,3 @@
-from tools.GracefulKiller import GracefulKiller
 import multiprocessing as mp
 import queue as q
 import numpy as np
@@ -6,7 +5,7 @@ from loguru import logger
 from tools.timer import Timer
 import threading
 import easygui
-import time
+import signal
 import ctypes
 
 import matplotlib
@@ -17,36 +16,28 @@ matplotlib.use('TkAgg')
 
 def initialize_plotter(*args, **kwargs):
     """Needed for multiprocessing."""
-    killer = GracefulKiller(log_exit=False)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     queue = args[0]
     title = kwargs.get('title')
     assert type(queue) == type(mp.Queue()), f"queue is not type Queue: {type(mp.Queue())}"
     depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
 
-    try:
-        # main depth chart loop, with a reopening prompt
-        reopen_prompt_flag = True
-        while True:
-            if not depth_chart_plotter.closed:
-                depth_chart_plotter.plot_depth_chart()
-            elif reopen_prompt_flag:
-                result = easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
-                if result:
-                    depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
-                else:
-                    reopen_prompt_flag = False
+    # try:
+    # main depth chart loop, with a reopening prompt
+    while True:
+        if not depth_chart_plotter.closed:
+            depth_chart_plotter.plot_depth_chart()
+        elif depth_chart_plotter.reopen_prompt_flag:
+            result = easygui.ynbox("Reopen depth chart?", "Depth chart closed!")
+            if result:
+                depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
             else:
-                break
-    # handling Ctrl+C for child processes
-    except InterruptedError as e:
-        # logger.info(f"CTRL+C InterruptedError: {e}")
-        pass
-    except AttributeError as e:
-        # logger.info(f"CTRL+C AttributeError: {e}")
-        pass
-    except KeyboardInterrupt as e:
-        # logger.info(f"CTRL+C KeyboardInterrupt: {e}")
-        pass
+                # if user chooses not to reopen, don't ask again
+                depth_chart_plotter.reopen_prompt_flag = False
+        else:
+            break
+
+    logger.debug("Depth chart plotting loop ended.")
 
 # windows only
 def reopen_depth_chart_win32(title, text, style):
@@ -109,10 +100,27 @@ class DepthChartPlotter:
 
         logger.debug("DepthChartPlotter initialized.")
 
-    def on_close(self, event):
-        # logger.debug(f"Figure closed.")
+    def close(self):
+        """Real close event that occurs at end of script."""
         self.closed = True
-        return None
+        self.flush_mp_queue()
+        plt.close()
+        self.reopen_prompt_flag = False
+        logger.debug(f"Ending depth chart plotting...")
+
+    def flush_mp_queue(self):
+        while True:
+            try:
+                self.queue.get(block=False)
+            except q.Empty:
+                break
+
+    def on_close(self, event):
+        """Catches window closes and plt.close() events but doesn't correspond to a 'real' close
+        that occurs when script is ending. Lets user have the option to reopen window."""
+        logger.debug(f"Depth Chart window closed.")
+        self.closed = True
+        self.reopen_prompt_flag = True
 
     def on_click(self, event):
         # logger.debug(f"Mouse clicked. Setting self.pause to True")
@@ -134,7 +142,11 @@ class DepthChartPlotter:
         if not self.paused:
 
             # get data and plot step functions
-            bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = self.get_data()
+            data = self.get_data()
+            if data is None:
+                return
+
+            bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity = data
 
             best_bid, best_ask, worst_bid, worst_ask = None, None, None, None
 
@@ -285,11 +297,16 @@ class DepthChartPlotter:
                 plt.pause(0.1)
                 continue
             else:
-                self.timestamp, self.sequence, self.unique_traders, \
-                    bid_levels, ask_levels = \
-                    data.get("timestamp"), data.get("sequence"), data.get("unique_traders"), \
-                    data.get("bid_levels"), data.get("ask_levels")
-                return self.transform_data(bid_levels, ask_levels, self.outlier_pct)
+                if data is None:
+                    logger.debug("Depth Chart received 'None' item. Ending...")
+                    self.close()
+                    break
+                else:
+                    self.timestamp, self.sequence, self.unique_traders, \
+                        bid_levels, ask_levels = \
+                        data.get("timestamp"), data.get("sequence"), data.get("unique_traders"), \
+                        data.get("bid_levels"), data.get("ask_levels")
+                    return self.transform_data(bid_levels, ask_levels, self.outlier_pct)
 
     @staticmethod
     def transform_data(bid_levels, ask_levels, outlier_pct) -> tuple:

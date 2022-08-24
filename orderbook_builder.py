@@ -203,7 +203,7 @@ class OrderbookBuilder:
 
     def __next_queue_mode(self):
         self.queue_mode = next(self.__queue_modes_cycle)
-        logger.debug(f"Queue processing mode set to '{self.queue_mode}'")
+        logger.debug(f"Orderbook builder queue processing mode set to '{self.queue_mode}'")
 
     def __skip_to_next_queue_mode(self, mode: str):
         assert mode in self.__queue_modes
@@ -418,7 +418,7 @@ class OrderbookBuilder:
         self.__queue_stats_timer.start()
         self.__queue_empty_timer.start()
         logger.info(
-            f"Queue worker starting now in {self.queue_mode} mode. Starting queue size: {self.queue.qsize()} items")
+            f"Orderbook builder starting now in {self.queue_mode} mode. Starting queue size: {self.queue.qsize()} items")
 
         while True:
 
@@ -465,11 +465,12 @@ class OrderbookBuilder:
                         self.__check_finished()
 
                 case "stop":
+                    self.__end_output_data()
                     self.__end_perf_data()
                     self.__save_dataframes(final=True)
                     self.__log_summary()
                     self.__clear_queues_and_exit()
-                    logger.info("Queue worker has finished.")
+                    logger.info("Orderbook builder has finished.")
                     break
 
     def __process_item(self, item: dict, output_data: bool = True, snapshot: bool = False) -> None:
@@ -644,6 +645,7 @@ class OrderbookBuilder:
                 raise ValueError("Unhandled msg type")
 
     def output_data(self):
+        # Using try-except as in __end_output_data() results in latency climb
         if self.output_queue is not None and self.output_queue.qsize() < self.output_queue._maxsize:
             timestamp = datetime.strptime(self.lob.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%m/%d/%Y-%H:%M:%S")
             bid_levels, ask_levels = self.lob.levels
@@ -655,7 +657,16 @@ class OrderbookBuilder:
             }
             # logger.debug(f"PLACING item {self.output_item_counter}: bid_levels {bid_levels}")
             # logger.debug(f"PLACING item {self.output_item_counter}: ask_levels {ask_levels}")
-            self.output_queue.put(data)
+            self.output_queue.put(data, block=False)
+
+    def __end_output_data(self):
+        if self.output_queue is not None:
+            try:
+                self.output_queue.put(None, block=False)
+            except q.Full:
+                pass
+            else:
+                logger.debug(f"Orderbook builder sent 'None' to output queue.")
 
     def __track_perf_data(self):
         # if self.latest_timestamp is not None:
@@ -669,13 +680,13 @@ class OrderbookBuilder:
 
         if self.stats_queue is not None:
             item = {
-                "process": "orderbook_builder_thread_loop",
+                "process": "orderbook_builder_thread",
                 "timestamp": datetime.utcnow().timestamp(),
                 "elapsed": self.module_timer.elapsed(),
                 "data": {
                     "total": self.total_count,
                     "count": self.count,
-                    "avg delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
+                    "avg_delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
                 },
             }
             self.stats_queue.put(item)
@@ -685,14 +696,15 @@ class OrderbookBuilder:
 
     @run_once
     def __end_perf_data(self):
-        """signal to performance data reader that feed is over. can only run once"""
         if self.stats_queue is not None:
-            item = (
-                datetime.utcnow().timestamp(),
-                "orderbook_build_loop",
-                "done"
-            )
+            item = {
+                "process": "orderbook_builder_thread",
+                "timestamp": datetime.utcnow().timestamp(),
+                "elapsed": self.module_timer.elapsed(),
+                "data": None,
+            }
             self.stats_queue.put(item)
+            logger.debug(f"Orderbook builder sent 'None' to stats queue.")
 
     def display_subscription(self, item: dict):
         assert len(item.get("channels")) == 1
@@ -714,7 +726,7 @@ class OrderbookBuilder:
             # giving datetime.timedelta(0) as the start value makes sum work on tds
             # source: https://stackoverflow.com/questions/3617170/average-timedelta-in-list
             average_timedelta = sum(self.__queue_stats["delta"], timedelta(0)) / len(self.__queue_stats["delta"])
-            logger.info(f"Average webhook-processing delay = {average_timedelta}")
+            logger.info(f"Average latency = {average_timedelta}")
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
             logger.info(f"Total items processed from queue = {self.total_count:,}")
 

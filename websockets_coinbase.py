@@ -130,24 +130,25 @@ class WebsocketClient:
     def __track_perf_data(self):
         # if self.latest_timestamp is not None:
         delay = max(datetime.utcnow().timestamp() - self.latest_timestamp.timestamp(), 0)
-        self.delays.append(delay)
         self.count += 1
         self.total_count += 1
+        self.delays.append(delay)
 
     @run_once_per_interval("stats_queue_interval")
     def __output_perf_data(self):
 
         if self.stats_queue is not None:
             item = {
-                "process": "websocket_thread_loop",
+                "process": "websocket_thread",
                 "timestamp": datetime.utcnow().timestamp(),
                 "elapsed": self.module_timer.elapsed(),
                 "data": {
                     "total": self.total_count,
                     "count": self.count,
-                    "avg delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
+                    "avg_delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
                 },
             }
+            # logger.debug(item)
             self.stats_queue.put(item)
 
             self.count = 0
@@ -157,12 +158,13 @@ class WebsocketClient:
     def __end_perf_data(self):
         if self.stats_queue is not None:
             item = {
-                "process": "websocket_thread_loop",
+                "process": "websocket_thread",
                 "timestamp": datetime.utcnow().timestamp(),
                 "elapsed": self.module_timer.elapsed(),
-                "data": "done",
+                "data": None,
             }
             self.stats_queue.put(item)
+            logger.debug(f"Websocket sent 'None' to stats queue.")
 
     def process_msg(self, msg: dict):
         timestamp = msg.get("time")
@@ -181,7 +183,7 @@ class WebsocketClient:
         self.thread.start()
 
     def kill_thread(self) -> None:
-        logger.info(f"Killing websocket thread for {self.id}...")
+        logger.info(f"Closing websocket thread for {self.id}...")
         self.kill = True
 
     def ping(self, string: str = "keepalive") -> None:
@@ -226,7 +228,7 @@ class WebsocketClientHandler:
         self.kill_signal_sent = True
 
     def kill_all(self) -> None:
-        logger.info(f"Killing all websocket threads...")
+        # logger.info(f"Killing all websocket threads...")
         for websocket_client in self.websocket_clients:
             self.kill(websocket_client)
         time.sleep(1)
@@ -255,10 +257,10 @@ class WebsocketClientHandler:
                 time.sleep(2)
 
     def websocket_thread_keepalive(self, interval=60) -> None:
-        time.sleep(interval)
-        while self.websockets_open:
-            # logger.debug(f"Active websockets: {self.get_active}")
-            # for i, websocket_client in enumerate(self.websocket_clients):
+        time.sleep(interval//10)
+
+        @run_once_per_interval(interval)
+        def ping_all():
             for websocket_client in self.websocket_clients:
                 if websocket_client.running:
                     try:
@@ -266,7 +268,11 @@ class WebsocketClientHandler:
                         logger.info(f"Pinged websocket for {websocket_client.market}.")
                     except WebSocketConnectionClosedException:
                         pass
-            time.sleep(interval)
+
+        while self.websockets_open:
+            ping_all()
+            time.sleep(interval//10)
+
         logger.info(f"No websockets open. Ending keepalive thread...")
 
     @property
