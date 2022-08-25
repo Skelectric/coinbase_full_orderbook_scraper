@@ -2,6 +2,9 @@ from multiprocessing import Queue
 from queue import Empty
 from itertools import cycle
 from random import randint
+from datetime import datetime
+import pprint
+from threading import Lock
 
 from loguru import logger
 
@@ -30,11 +33,24 @@ def initialize_plotter(queue: Queue, *args, **kwargs):
 
 
 class PerformancePlotter:
-    def __init__(self, queue: Queue, window: int = 1000, ):
+    """Expects queue items in this format:
+            item = {
+                "process": "[process]",
+                "timestamp": datetime.utcnow().timestamp(),
+                "elapsed": self.module_timer.elapsed(),
+                "data": {
+                    "total": self.total_count,
+                    "count": self.count,
+                    "avg_delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
+                    ...
+                },
+            }
+    """
+    def __init__(self, queue: Queue, window: int = 1000, module_timer=None):
         self.queue = queue
         self.app = pg.mkQApp("Worker Stats")
         self.pw = pg.GraphicsLayoutWidget(show=True)
-        self.pw.resize(800, 300)
+        self.pw.resize(600, 600)
         self.pw.setWindowTitle('pyqtgraph: worker stats')
 
         # date_x_axis = pg.DateAxisItem(orientation='bottom')
@@ -52,13 +68,21 @@ class PerformancePlotter:
         self.p2.setLabel('bottom', 'elapsed time', units='seconds')
         self.p2.setLabel('left', 'item processing rate')
         self.p2.setDownsampling(mode='subsample')
-        # self.p2.setLogMode(x=False, y=True)
+
+        self.pw.nextRow()
 
         # delay plot
         self.p3 = self.pw.addPlot(axisItems={"bottom": pg.AxisItem(orientation='bottom')})
         self.p3.setLabel('bottom', 'elapsed time', units='seconds')
         self.p3.setLabel('left', 'avg latency', units='seconds')
         self.p3.setDownsampling(mode='subsample')
+
+        # performance plotter queue size
+        self.p4 = self.pw.addPlot(axisItems={"bottom": pg.AxisItem(orientation='bottom')})
+        self.p4.setLabel('bottom', 'elapsed time', units='seconds')
+        self.p4.setLabel('left', 'queue size', units='items')
+        self.p4.setDownsampling(mode='subsample')
+        self.p4.addLegend()
 
         # self.pw.show()
 
@@ -84,6 +108,7 @@ class PerformancePlotter:
             }
         )
 
+        # performance stats for self
         self.timer = Timer()
         self.timer.start()
 
@@ -104,7 +129,11 @@ class PerformancePlotter:
 
         try:
             try:
-                self.update()
+                self.update_data()
+                self.update_p1()
+                self.update_p2()
+                self.update_p3()
+                self.update_p4()
             # haven't figured out a way to stop event loop without raising ValueError
             except ValueError:
                 logger.debug(f"Performance plotter exited loop via Exception")
@@ -121,62 +150,50 @@ class PerformancePlotter:
         except NoProcessesLeft:
             self.close()
 
-    def update(self):
-
-        try:
-            self.update_arrays()
-
-            self.update_p1()
-            self.update_p2()
-            self.update_p3()
-
-        except KeyboardInterrupt as e:
-            logger.info(f"CTRL+C KeyboardInterrupt: {e}")
-            pass
-
     def update_p1(self):
         self.p1.clear()
-        for process in self.data.keys():
-            x = np.array(self.data[process]["timestamp"])
-            y = np.array(self.data[process]["data"]["total"])
-            if len(x) == len(y):
-                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
-                self.p1.addItem(item)
-            else:
-                logger.warning(f"{process} queued unequal length arrays for plot 1:")
-                logger.warning(f"timestamp = {x}")
-                logger.warning(f"total = {y}")
+        for process in (key for key in self.data.keys() if key != "performance_plotter"):
+            item = self.make_curve_item(process, "timestamp", "total")
+            self.p1.addItem(item)
 
     def update_p2(self):
         self.p2.clear()
-        for process in self.data.keys():
-            x = np.array(self.data[process]["elapsed"])
-            y = np.array(self.data[process]["data"]["count"])
-            if len(x) == len(y):
-                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
-                self.p2.addItem(item)
-            else:
-                logger.warning(f"{process} queued unequal length arrays for plot 2:")
-                logger.warning(f"elapsed = {x}")
-                logger.warning(f"count = {y}")
+        for process in (key for key in self.data.keys() if key != "performance_plotter"):
+            item = self.make_curve_item(process, "elapsed", "count")
+            self.p2.addItem(item)
 
     def update_p3(self):
         self.p3.clear()
-        for process in self.data.keys():
-            x = np.array(self.data[process]["timestamp"])
-            y = np.array(self.data[process]["data"]["avg_delay"])
-            if len(x) == len(y):
-                item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
-                self.p3.addItem(item)
-            else:
-                logger.warning(f"{process} queued unequal length arrays for plot 3:")
-                logger.warning(f"elapsed = {x}")
-                logger.warning(f"delay = {y}")
+        for process in (key for key in self.data.keys() if key != "performance_plotter"):
+            item = self.make_curve_item(process, "timestamp", "avg_delay")
+            self.p3.addItem(item)
 
-    def update_arrays(self):
+    def update_p4(self):
+        self.p4.clear()
+        process = "performance_plotter"
+        item = self.make_curve_item(process, "elapsed", "queue_size")
+        self.p4.addItem(item)
+
+    def make_curve_item(self, process: str, x_var: str, y_var: str) -> pg.PlotCurveItem:
+        assert x_var in {"timestamp", "elapsed"}, "x_var is not 'timestamp' or 'elapsed'!"
+        msg = f"y_var is not an available datapoint! choices are: {self.data[process]['data'].keys()}"
+        assert y_var in self.data[process]["data"].keys(), msg
+        x = np.array(self.data[process][x_var])
+        y = np.array(self.data[process]["data"][y_var])
+        if len(x) == len(y):
+            item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
+            return item
+        else:
+            logger.warning(f"{process} queued unequal length arrays!")
+            logger.warning(f"{x_var} = {x}")
+            logger.warning(f"{y_var} = {y}")
+
+    def update_data(self):
         item = self.get_data()
         process, timestamp, elapsed, data = \
             item.get("process"), item.get("timestamp"), item.get("elapsed"), item.get("data")
+
+        self.latest_timestamp = timestamp
 
         if data is None:
             msg = f"Performance plotter has received 'None' data from {process}. "
@@ -191,10 +208,28 @@ class PerformancePlotter:
             for k, v in data.items():
                 self.data[process]["data"][k].append(v)
 
-            if self.data[process]["pen"] is None:  # set line color only once per process
-                self.data[process]["pen"] = next(self.pens)
+            self.choose_pen(process)
 
-    def get_data(self):
+        # logger.debug(f"before perf plotter data")
+        # self.print_data_readable()
+
+        # track elapsed and queue size for self
+        self.data["performance_plotter"]["timestamp"].append(datetime.utcnow().timestamp())
+        self.data["performance_plotter"]["elapsed"].append(self.timer.elapsed())
+        qsize = self.queue.qsize()
+        self.data["performance_plotter"]["data"]["queue_size"].append(qsize)
+        self.choose_pen("performance_plotter")
+
+        # logger.debug(f"after perf plotter data")
+        # self.print_data_readable()
+
+    def choose_pen(self, process: str) -> None:
+        """Sets a line color only once per process."""
+        if self.data[process]["pen"] is None:
+            # noinspection PyTypedDict
+            self.data[process]["pen"] = next(self.pens)
+
+    def get_data(self) -> any:
         while True:
             try:
                 item = self.queue.get(block=False)
@@ -203,14 +238,13 @@ class PerformancePlotter:
             else:
                 return item
 
-    def remove_process(self, process: str):
+    def remove_process(self, process: str) -> None:
         logger.debug(f"Removing {process} from stats plotting.")
         if process in self.data.keys():
             self.data.pop(process)
 
-        # logger.debug(f"Remaining processes: {self.data.keys()}")
-        if len(self.data) == 0:
-            # logger.debug(f"raising NoProcessesLeft")
+        logger.debug(f"Remaining processes: {self.data.keys()}")
+        if len(self.data) == 1:  # todo: replace with only 'performance plotter' left
             raise NoProcessesLeft
 
     def flush_mp_queue(self):
@@ -220,6 +254,24 @@ class PerformancePlotter:
                 self.queue.get(block=False)
             except Empty:
                 break
+
+    def print_data_readable(self):
+        data_as_dict = {k: v for k, v in self.data.items()}
+        for process in data_as_dict:
+            for key in data_as_dict[process]:
+                if isinstance(data_as_dict[process][key], deque):
+                    data_as_dict[process][key] = list(data_as_dict[process][key])
+                if isinstance(data_as_dict[process][key], defaultdict):
+                    data_as_dict[process][key] = dict(data_as_dict[process][key])
+                    for data in data_as_dict[process][key]:
+                        if isinstance(data_as_dict[process][key][data], deque):
+                            data_as_dict[process][key][data] = list(data_as_dict[process][key][data])
+
+        pp = pprint.PrettyPrinter(indent=4)
+
+        print_lock = Lock()
+        with print_lock:
+            pp.pprint(data_as_dict)
 
 
 class NoProcessesLeft(Exception):
