@@ -12,6 +12,8 @@ from tools.timer import Timer
 import signal
 
 import numpy as np
+from scipy.ndimage import uniform_filter1d
+
 from collections import deque, defaultdict
 
 import pyqtgraph as pg
@@ -97,16 +99,29 @@ class PerformancePlotter:
         self.fps = None
         self.qtimer = QtCore.QTimer()
 
+        # self.data = defaultdict(
+        #     lambda: {
+        #         "timestamp": deque(maxlen=window),
+        #         "elapsed": deque(maxlen=window),
+        #         "data": defaultdict(
+        #             lambda: deque(maxlen=window)
+        #         ),
+        #         "pen": None
+        #     }
+        # )
+
         self.data = defaultdict(
             lambda: {
-                "timestamp": deque(maxlen=window),
-                "elapsed": deque(maxlen=window),
+                "timestamp": np.negative(np.ones(window)),
+                "elapsed": np.negative(np.ones(window)),
                 "data": defaultdict(
-                    lambda: deque(maxlen=window)
+                    lambda: np.negative(np.ones(window))
                 ),
                 "pen": None
             }
         )
+
+        self.counter = 0
 
         # performance stats for self
         self.timer = Timer()
@@ -130,6 +145,7 @@ class PerformancePlotter:
         try:
             try:
                 self.update_data()
+                self.update_data_for_self()
                 self.update_p1()
                 self.update_p2()
                 self.update_p3()
@@ -159,7 +175,7 @@ class PerformancePlotter:
     def update_p2(self):
         self.p2.clear()
         for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "elapsed", "count")
+            item = self.make_curve_item(process, "elapsed", "count", (True, 20))
             self.p2.addItem(item)
 
     def update_p3(self):
@@ -171,15 +187,27 @@ class PerformancePlotter:
     def update_p4(self):
         self.p4.clear()
         process = "performance_plotter"
-        item = self.make_curve_item(process, "elapsed", "queue_size")
+        item = self.make_curve_item(process, "elapsed", "queue_size", (True, 10))
         self.p4.addItem(item)
 
-    def make_curve_item(self, process: str, x_var: str, y_var: str) -> pg.PlotCurveItem:
+    def make_curve_item(
+            self, process: str, x_var: str, y_var: str,
+            moving_avg: (bool, int) = (False, 10), preserve_ymax: bool = False
+    ) -> pg.PlotCurveItem:
         assert x_var in {"timestamp", "elapsed"}, "x_var is not 'timestamp' or 'elapsed'!"
         msg = f"y_var is not an available datapoint! choices are: {self.data[process]['data'].keys()}"
         assert y_var in self.data[process]["data"].keys(), msg
-        x = np.array(self.data[process][x_var])
-        y = np.array(self.data[process]["data"][y_var])
+
+        x = self.data[process][x_var]
+        y = self.data[process]["data"][y_var]
+
+        x = x[x != -1]
+        y = y[y != -1]
+
+        moving_avg_flag, moving_avg_window = moving_avg
+        if moving_avg_flag:
+            y = uniform_filter1d(y, moving_avg_window)
+
         if len(x) == len(y):
             item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
             return item
@@ -202,26 +230,31 @@ class PerformancePlotter:
             self.remove_process(process)
 
         else:
-            self.data[process]["timestamp"].append(timestamp)
-            self.data[process]["elapsed"].append(elapsed)
+            # self.data[process]["timestamp"].append(timestamp)
+            # self.data[process]["elapsed"].append(elapsed)
+            self.np_append(self.data[process]["timestamp"], timestamp)
+            self.np_append(self.data[process]["elapsed"], elapsed)
 
             for k, v in data.items():
-                self.data[process]["data"][k].append(v)
+                self.np_append(self.data[process]["data"][k], v)
 
             self.choose_pen(process)
 
-        # logger.debug(f"before perf plotter data")
-        # self.print_data_readable()
-
+    def update_data_for_self(self):
         # track elapsed and queue size for self
-        self.data["performance_plotter"]["timestamp"].append(datetime.utcnow().timestamp())
-        self.data["performance_plotter"]["elapsed"].append(self.timer.elapsed())
+        self.np_append(self.data["performance_plotter"]["timestamp"], datetime.utcnow().timestamp())
+        self.np_append(self.data["performance_plotter"]["elapsed"], self.timer.elapsed())
         qsize = self.queue.qsize()
-        self.data["performance_plotter"]["data"]["queue_size"].append(qsize)
-        self.choose_pen("performance_plotter")
+        self.np_append(self.data["performance_plotter"]["data"]["queue_size"], qsize)
 
-        # logger.debug(f"after perf plotter data")
-        # self.print_data_readable()
+        # try:
+        #     qsize_prev = self.data["performance_plotter"]["data"]["queue_size"][-1]
+        # except IndexError:
+        #     qsive_prev = qsize
+        #
+        # self.np_append(self.data["performance_plotter"]["data"]["queue_size_delta"], qsize_prev)
+
+        self.choose_pen("performance_plotter")
 
     def choose_pen(self, process: str) -> None:
         """Sets a line color only once per process."""
@@ -243,8 +276,8 @@ class PerformancePlotter:
         if process in self.data.keys():
             self.data.pop(process)
 
-        logger.debug(f"Remaining processes: {self.data.keys()}")
-        if len(self.data) == 1:  # todo: replace with only 'performance plotter' left
+        # logger.debug(f"Remaining processes: {self.data.keys()}")
+        if list(self.data.keys()) == ['performance_plotter']:
             raise NoProcessesLeft
 
     def flush_mp_queue(self):
@@ -254,6 +287,12 @@ class PerformancePlotter:
                 self.queue.get(block=False)
             except Empty:
                 break
+
+    @staticmethod
+    def np_append(np_array, item) -> None:
+        """Append to a numpy array and rotate as if it's a deque."""
+        np_array[:-1] = np_array[1:]  # shift all elements left 1 step
+        np_array[-1] = item  # place item into last element
 
     def print_data_readable(self):
         data_as_dict = {k: v for k, v in self.data.items()}

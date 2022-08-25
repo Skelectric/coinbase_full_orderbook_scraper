@@ -139,13 +139,15 @@ class OrderbookBuilder:
             self.candles = CandleDataFrame(exchange="Coinbase", frequency="1T", timestamp=module_timestamp)
         self.first_sequence = None
         self.snapshot_sequence = None
-        self.websocket_sequence = None
+        self.first_websocket_sequence = None
         self.missing_sequences = []
         self.prev_sequence = None
         self.sequence = None
         self.latest_timestamp = None
         self.queue = queue
-        self.temp_queue = q.Queue()
+        self.backfill_queue = q.Queue()
+        self.backfill_item_count = 0
+        self.backfill_items_processed = 0
 
         self.output_queue = output_queue
         if self.output_queue is not None:
@@ -172,10 +174,7 @@ class OrderbookBuilder:
 
         # queue processing modes, in order
         self._snapshot_stats_interval = 10
-        # Todo: use a linked data structure for these queue modes
-        # Todo: where each mode links to the next
-        # Todo: and each subsequent nodes is aware of all previous nodes
-        self.__queue_modes = ("snapshot", "websocket", "finish", "stop")
+        self.__queue_modes = ("snapshot", "backfill", "websocket", "finish", "stop")
         self.__queue_modes_cycle = cycle(self.__queue_modes)
         self.queue_mode = None
         self.__next_queue_mode()
@@ -183,7 +182,7 @@ class OrderbookBuilder:
         # skip snapshot mode if 0 snapshot items loaded
         if snapshot_order_count == 0:
             logger.debug("No snapshot items.")
-            self.__next_queue_mode()
+            self.__skip_to_next_queue_mode("websocket")
 
         # main processing thread
         self.thread = Thread(target=self.__process_queue)
@@ -345,6 +344,13 @@ class OrderbookBuilder:
             logger.info(f"Snapshot processed.")
             self.__next_queue_mode()
 
+    def __check_backfill_done(self):
+        if self.backfill_queue.empty():
+            msg = f"Backfill processed. {self.backfill_items_processed} out of "
+            msg += f"{self.backfill_item_count} had a valid sequence."
+            logger.info(msg)
+            self.__next_queue_mode()
+
     # Todo: condense next three methods into one
     @run_once
     def __log_first_sequence(self, sequence=None):
@@ -363,24 +369,53 @@ class OrderbookBuilder:
         logger.debug(f"Snapshot sequence = {self.snapshot_sequence}")
 
     @run_once
-    def __log_websocket_sequence(self, sequence=None):
+    def __log_first_websocket_sequence(self, sequence=None):
         """Store first websocket sequence."""
         if sequence is None and self.sequence is not None:
             sequence = copy.deepcopy(self.sequence)
-        self.websocket_sequence = sequence
-        logger.debug(f"Websocket sequence = {self.websocket_sequence}")
+        self.first_websocket_sequence = sequence
+        logger.debug(f"Websocket sequence = {self.first_websocket_sequence}")
 
-    def __check_missing_sequences(self, start: int, end: int):
-        # Todo: abstract this away for all missing sequence scenarios
-        if None not in (start, end) and start + 1 < end:
+    def __log_missing_sequences(self, start: int, end: int) -> int:
+        """Logs missing sequences into log and list object, and returns count of marginal missing sequences"""
+        missing_range = range(0, 0)
+        if None not in (start, end):
             missing_range = range(start + 1, end)
-            logger.warning(f"Missing {len(missing_range)} sequences: {missing_range}")
-            self.missing_sequences.extend(missing_range)
+            # logger.debug(f"missing_range = {missing_range}, length = {len(missing_range)}")
+            if len(missing_range) != 0:
+                logger.warning(f"Missing {len(missing_range)} sequences: {missing_range}")
+                self.missing_sequences.extend(missing_range)
+        return len(missing_range)
 
     @run_once
-    def __check_post_snapshot_missing_sequences(self):
+    def __log_post_snapshot_missing_sequences(self):
         """Assumes websocket starts feeding data before snapshot"""
-        self.__check_missing_sequences(self.snapshot_sequence, self.first_sequence)
+        # logger.debug(f"calling __log_missing_sequences on start={self.snapshot_sequence}, end={self.first_sequence}")
+        count = self.__log_missing_sequences(self.snapshot_sequence, self.first_sequence)
+        if count > 0:
+            msg = f"Snapshot sequence is too early! Increase delay between opening websocket and requesting snapshot."
+            logger.warning(msg)
+        else:
+            msg = f"Snapshot sequence is after first sequence from websocket -> OK."
+            logger.debug(msg)
+
+    @run_once
+    def __log_processing_backfill(self):
+        if self.backfill_queue.qsize() != 0:
+            logger.info(f"Processing {self.backfill_queue.qsize()} items in backfill queue...")
+            self.backfill_item_count = self.backfill_queue.qsize()
+
+    # Todo: Find a way to show starting and ending sequence in a single line
+    @run_once_per_interval(0.1)
+    def __log_backfilling(self, sequence):
+        msg = f"Non-snapshot item (sequence {sequence}) provided in snapshot mode. Placing into backfill queue..."
+        logger.debug(msg)
+
+    def __log_invalid_sequence(self, sequence, item):
+        if self.queue_mode != 'backfill':
+            msg = f"Item below provided out of sequence (current={self.sequence}, provided={sequence})"
+            logger.warning(msg)
+            logger.warning(f"{item}")
 
     def __check_finished(self):
         if self.queue.empty():
@@ -395,18 +430,41 @@ class OrderbookBuilder:
 
     def __get_and_process_item(self, *args, **kwargs):
         """Get item from queue and call process_item.
-        Raises JustContinueException if item is None, to enable use of continue in outer loop (__process_queue).
+        Raises JustContinueException if item is None, to enable use of continue in outer function (__process_queue).
         """
+
+        backfill = kwargs.get("backfill", False)
+
         try:
-            item = self.queue.get(timeout=0.01)
+
+            if backfill:
+                try:
+                    item = self.backfill_queue.get(block=False)
+                except q.Empty:
+                    raise q.Empty
+
+            else:
+                # use timeout instead of non-blocking because block=False
+                # results in frequent wasted event loop and high latency
+                item = self.queue.get(timeout=1)
+
             if item is None:
                 self.__total_queue_items_skipped += 1
                 raise JustContinueException
 
-            self.__process_item(item, *args, **kwargs)
-            self.__track_perf_data()
-            self.__lob_checked = False
-            self.queue.task_done()
+            try:
+                self.__process_item(item, *args, **kwargs)
+            except AttributeError as e:
+                logger.warning(f"Attribute Error: {e} caused by {item}")
+            else:
+                self.__track_perf_data()
+                self.__lob_checked = False
+
+            # finally:
+            #     if backfill:
+            #         self.backfill_queue.task_done()
+            #     else:
+            #         self.queue.task_done()
 
         except q.Empty as e:
             raise q.Empty
@@ -430,7 +488,7 @@ class OrderbookBuilder:
 
                     # check for missing sequences between snapshot and start of websocket
                     if None not in (self.snapshot_sequence, self.first_sequence):  # redundant None check due to @run_once
-                        self.__check_post_snapshot_missing_sequences()
+                        self.__log_post_snapshot_missing_sequences()
 
                     try:
                         self.__get_and_process_item(output_data=False, snapshot=True)
@@ -442,6 +500,19 @@ class OrderbookBuilder:
                     finally:
                         self.__check_snapshot_done()
 
+                case "backfill":
+
+                    self.__log_processing_backfill()
+
+                    try:
+                        self.__get_and_process_item(backfill=True)
+                    except JustContinueException:
+                        continue
+                    except q.Empty:
+                        self.__check_backfill_done()
+                    else:
+                        self.__output_perf_data()
+
                 case "websocket":
                     try:
                         self.__get_and_process_item()
@@ -452,7 +523,7 @@ class OrderbookBuilder:
                         self.__timed_lob_check()
                     else:
                         self.__output_perf_data()
-                        self.__timed_get_queue_stats(track_delay=True)
+                        # self.__timed_get_queue_stats(track_delay=True)
                         self.__save(timed=True)
 
                 case "finish":
@@ -473,9 +544,10 @@ class OrderbookBuilder:
                     logger.info("Orderbook builder has finished.")
                     break
 
-    def __process_item(self, item: dict, output_data: bool = True, snapshot: bool = False) -> None:
+    def __process_item(self, item: dict, output_data: bool = True, *args, **kwargs) -> None:
 
-        # s_print(f"item = {item}")
+        snapshot = kwargs.get("snapshot", False)
+        backfill = kwargs.get("backfill", False)
 
         item_type, sequence, order_id, \
         side, size, remaining_size, \
@@ -495,8 +567,8 @@ class OrderbookBuilder:
         if self.first_sequence is None and sequence is not None:
             self.__log_first_sequence(sequence)
 
-        if self.websocket_sequence is None and sequence is not None and not snapshot:
-            self.__log_websocket_sequence(sequence)
+        if self.first_websocket_sequence is None and sequence is not None and not snapshot and not backfill:
+            self.__log_first_websocket_sequence(sequence)
 
         # item validity checks ---------------------------------------------------------
         valid_sequence, valid_received, valid_open, valid_done, valid_change = True, True, True, True, True
@@ -514,7 +586,7 @@ class OrderbookBuilder:
 
             # check for missing sequences
             if self.prev_sequence is not None and self.sequence != self.prev_sequence + 1:
-                self.__check_missing_sequences(self.prev_sequence, self.sequence)
+                self.__log_missing_sequences(self.prev_sequence, self.sequence)
 
         match item_type:
             case "snapshot":
@@ -569,9 +641,6 @@ class OrderbookBuilder:
 
                 self.lob.process(order, action="add")
 
-                # self.lob.display_bid_tree()
-                # self.lob.display_ask_tree()
-                # self.lob.check()
                 if output_data:
                     self.output_data()
 
@@ -593,9 +662,6 @@ class OrderbookBuilder:
 
                 self.lob.process(order, action="remove")
 
-                # self.lob.display_bid_tree()
-                # self.lob.display_ask_tree()
-                # self.lob.check()
                 if output_data:
                     self.output_data()
 
@@ -617,9 +683,6 @@ class OrderbookBuilder:
 
                 self.lob.process(order, action="change")
 
-                # self.lob.display_bid_tree()
-                # self.lob.display_ask_tree()
-                # self.lob.check()
                 if output_data:
                     self.output_data()
 
@@ -629,20 +692,22 @@ class OrderbookBuilder:
                 if self.__build_candles:
                     self.candles.process_item(item)
 
+            # place items into backfill queue while snapshot is processing
+            # valid_sequence is false when queue mode is snapshot and item_type is not snapshot
             case _ if not valid_sequence and snapshot:
-                msg = f"Non-snapshot item provided in snapshot mode"
-                msg += f" (current={self.sequence}, provided={sequence}). Skipping..."
-                logger.debug(msg)
+                self.__log_backfilling(sequence)
+                self.backfill_queue.put(item)
 
             case _ if not valid_sequence:
-                msg = f"Item below provided out of sequence (current={self.sequence}, provided={sequence})"
-                logger.warning(msg)
-                logger.warning(f"{item}")
+                self.__log_invalid_sequence(sequence, item)
 
             case _:
                 logger.critical(f"Below item's type is unhandled!")
                 logger.critical(f"{item}")
                 raise ValueError("Unhandled msg type")
+
+        if backfill and valid_sequence:
+            self.backfill_items_processed += 1
 
     def output_data(self):
         # Using try-except as in __end_output_data() results in latency climb

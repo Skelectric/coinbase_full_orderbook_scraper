@@ -42,6 +42,9 @@ ITEM_DISPLAY_FLAGS = {
     "change": False
 }
 LOAD_ORDERBOOK_SNAPSHOT = True
+# Coinbase snapshot tends to provide a sequence earlier than where websocket starts
+SNAPSHOT_GET_DELAY = 0.75  # in seconds.
+
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_CANDLES = False
 PLOT_DEPTH_CHART = True
@@ -58,8 +61,8 @@ SAVE_INTERVAL = 360
 STORE_FEED_IN_MEMORY = False
 
 PLOT_PERFORMANCE = True
-PERF_PLOT_INTERVAL = 0.01  # output to performance plotter queue every interval seconds
-PERF_PLOT_WINDOW = 5  # in seconds (approximate)
+PERF_PLOT_INTERVAL = 0.05  # output to performance plotter queue every interval seconds
+PERF_PLOT_WINDOW = 20  # in seconds (approximate)
 
 # ======================================================================================
 # Webhook Parameters
@@ -184,16 +187,18 @@ if __name__ == '__main__':
 
     # load orderbook snapshot into queue
     snapshot_order_count = 0
-    if not WEBHOOK_ONLY:
-        if LOAD_ORDERBOOK_SNAPSHOT:
-            orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
-            snapshot_loader = OrderbookSnapshotLoader(
-                queue=data_queue,
-                depth=ORDERBOOK_SNAPSHOT_DEPTH,
-                orderbook_snapshot=orderbook_snapshot
-            )
-            # noinspection PyRedeclaration
-            snapshot_order_count = snapshot_loader.order_count
+    if not WEBHOOK_ONLY and LOAD_ORDERBOOK_SNAPSHOT:
+        if SNAPSHOT_GET_DELAY != 0:
+            logger.debug(f"Delaying orderbook snapshot request by {SNAPSHOT_GET_DELAY} seconds...")
+            time.sleep(SNAPSHOT_GET_DELAY)
+        orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
+        snapshot_loader = OrderbookSnapshotLoader(
+            queue=data_queue,
+            depth=ORDERBOOK_SNAPSHOT_DEPTH,
+            orderbook_snapshot=orderbook_snapshot
+        )
+        # noinspection PyRedeclaration
+        snapshot_order_count = snapshot_loader.order_count
 
     # initialize depth_chart and queue_worker if not webhook-only mode
     orderbook_builder = None
