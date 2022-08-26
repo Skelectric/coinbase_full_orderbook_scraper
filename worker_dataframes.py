@@ -168,11 +168,12 @@ class MatchDataFrame(WorkerDataFrame):
         self.filename = None
         self.timestamp = timestamp if timestamp is not None else datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    def process_item(self, item, display_match=True) -> None:
+    def process_item(self, item, display_match=True, store_in_df=False) -> None:
         if display_match:
             self.display_match(item)
-        item = self.convert_to_df(item)
-        self.concat(item)
+        if store_in_df:
+            item = self.convert_to_df(item)
+            self.concat(item)
 
     def convert_to_df(self, item) -> pd.DataFrame():
         """Converts passed item from dict to DataFrame"""

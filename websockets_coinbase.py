@@ -1,4 +1,5 @@
 import json
+import gzip
 import threading
 import time
 from pathlib import Path
@@ -24,31 +25,28 @@ class WebsocketClient:
     def __init__(
             self,
             api: CoinbaseAPI,
-            channel: str,
-            market: str,
             data_queue: queue.Queue = None,
-            endpoint: str = None,
-            dump_feed: bool = False,
-            output_folder: str = None,
             module_timer: Timer = None,
             stats_queue: mp.Queue = None,
             stats_queue_interval: float = None,
-
+            *args, **kwargs
     ) -> None:
-        self.channel = channel
-        self.market = market
+        self.channel = kwargs.get("channel", None)
+        self.market = kwargs.get("market", None)
+        self.exchange = kwargs.get("exchange", None)
         self.data_queue = data_queue
         self.id = self.channel + '_' + self.market
-        self.ws = None
-        self.ws_url = endpoint
+        self.ws_url = kwargs.get("endpoint", None)
         self.user = api.get_user()
+        self.save_feed = kwargs.get("save_feed", False)
+        self.output_folder = kwargs.get("output_folder", "data")
+        self.module_timer = module_timer
+
+        self.ws = None
         self.thread = None
         self.thread_id = None
         self.running = None
         self.kill = False
-        self.dump_feed = dump_feed
-        self.output_folder = output_folder
-        self.module_timer = module_timer
 
         # performance monitoring
         self.latest_timestamp = None
@@ -74,12 +72,13 @@ class WebsocketClient:
             )
         )
 
-        # For local testing
-        if self.dump_feed:
-            json_msgs = []
-            module_timestamp = self.module_timer.get_start_time(_format="datetime").strftime("%Y%m%d-%H%M%S")
-            json_filename = f"coinbase_{self.channel}_{self.market}_dump_{module_timestamp}.json"
-            json_filepath = Path.cwd() / self.output_folder / json_filename
+        feed_filename = None
+        if self.save_feed:
+            module_timestamp = self.module_timer.get_start_time(_format="datetime_utc").strftime("%Y%m%d-%H%M%S")
+            feed_filename = f"{self.exchange}_{self.channel}_{self.market}_dump_{module_timestamp}.json.gz"
+            Path(self.output_folder).mkdir(parents=True, exist_ok=True)
+            feed_filepath = Path.cwd() / self.output_folder / feed_filename
+            f = gzip.open(feed_filepath, 'wt', encoding='UTF-8')
 
         self.running = True
 
@@ -101,13 +100,17 @@ class WebsocketClient:
             else:
                 if msg != {}:
 
-                    if self.dump_feed:
-                        json_msgs.append(msg)
+                    if self.save_feed:
+                        f.write(json.dumps(msg)+'\n')
 
                     self.process_msg(msg)
 
                 else:
                     logger.warning("Webhook message is empty!")
+
+        if self.save_feed:
+            f.close()
+            logger.debug(f"Saved feed into {feed_filename}")
 
         # signal to performance plotter that messages are ending
         self.__end_perf_data()
@@ -119,11 +122,6 @@ class WebsocketClient:
         except WebSocketConnectionClosedException:
             pass
         logger.info(f"Closed websocket for {self.id}.")
-
-        if self.dump_feed:
-            with open(json_filepath, 'w', encoding='utf-8') as f:
-                json.dump(json_msgs, f, indent=4)
-                logger.info(f"Dumped feed into {json_filename}.")
 
         self.running = False
 
@@ -276,7 +274,7 @@ class WebsocketClientHandler:
         logger.info(f"No websockets open. Ending keepalive thread...")
 
     @property
-    def short_str_markets(self) -> str:
+    def short_market_str(self) -> str:
         # get market symbols and append into single string i.e. BTC,ETH,SOL
         return ','.join([websocket.__market[:websocket.__market.find("-")] for websocket in self.websocket_clients])
 

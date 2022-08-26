@@ -6,7 +6,8 @@ def datetime_formatter(func):
 
     def in_datetime(seconds: float, utc: bool = False) -> datetime:
         dt = datetime.utcnow().timestamp() if utc else datetime.now().timestamp()
-        return datetime.fromtimestamp(dt + seconds)
+        delta = time.perf_counter() - seconds
+        return datetime.fromtimestamp(dt - delta)
 
     def wrapper(*args, **kwargs):
         __time = func(*args, **kwargs)
@@ -43,6 +44,7 @@ def time_formatter(func):
 
 class Timer:
     def __init__(self) -> None:
+        self.start_time = None
         self.__start_time = None
         self.__last_time = None
 

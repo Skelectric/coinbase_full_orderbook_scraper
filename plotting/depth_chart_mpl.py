@@ -181,7 +181,7 @@ class DepthChartPlotter:
                 bid_liq_index = np.searchsorted(bid_prices, price_moved_down, side='right')
                 bid_liq = bid_liquidity[bid_liq_index-1]
 
-                bid_ask_txt = f"bid/ask/spread/mid {best_bid:,.3f} / {best_ask:,.3f}"
+                bid_ask_txt = f"bid/ask {best_bid:,.3f} / {best_ask:,.3f}"
                 mid_spread_txt = f"mid/spread {mid:.3f} / {bid_ask_spread:.3f}"
                 worst_bid_ask_txt = f"worst bid {worst_bid:.3f}... worst ask {worst_ask:.3f}."
                 ask_liquidity_txt = f"Amount to move price up {self.move_price_pct:.2%} "
@@ -258,14 +258,7 @@ class DepthChartPlotter:
                 f"draw-time = {self.__timer.lap():.4f} sec"
             )
 
-            threads = [thread.name for thread in threading.enumerate()]
-            display_text_lower_left = (
-                "Threads:",
-                *threads
-            )
-
             self.fill_misc_text(display_text_upper_left, x=0.005, y=0.98, d=-0.03)
-            self.fill_misc_text(display_text_lower_left, x=0.005, y=0.25, d=-0.03)
 
             # final draw events ----------------------------------------------------
 
@@ -276,7 +269,7 @@ class DepthChartPlotter:
         else:
             # logger.debug(f"Plotting queue is empty or self.pause=True.")
             # time.sleep(1)
-            plt.pause(0.1)
+            plt.pause(0.01)
             pass
 
     def fill_misc_text(self, display_text, x, y, d):

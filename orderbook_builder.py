@@ -1,4 +1,5 @@
 import json
+import gzip
 import threading
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -24,17 +25,52 @@ import numpy as np
 class JustContinueException(Exception):
     pass
 
-# Todo: make an OrderbookSnapshotSaver
 
-
-class OrderbookSnapshotLoader:
+class OrderbookSnapshotHandler:
     """class that loads dict containing orderbook snapshot into the OrderbookBuilder's input queue"""
-    def __init__(self, queue: q.Queue, depth: int = None, orderbook_snapshot: dict = None):
+    def __init__(self, queue: q.Queue,
+                 depth: int = None,
+                 orderbook_snapshot: dict = None,
+                 **kwargs):
         self.order_count = 0
-        self.sequence = orderbook_snapshot["sequence"]
-        self.load_orderbook_snapshot(queue, orderbook_snapshot, depth)
 
-    def load_orderbook_snapshot(self, _queue, orderbook_snapshot, depth) -> None:
+        if orderbook_snapshot is None:
+            snapshot_filepath = kwargs.get("snapshot_filepath", None)
+            if snapshot_filepath is None:
+                raise Exception("No orderbook snapshot or orderbook snapshot file provided!")
+            else:
+                orderbook_snapshot = self.load_orderbook_snapshot(snapshot_filepath)
+
+        if kwargs.get("save", False):
+            logger.debug(f"Saving orderbook snapshot...")
+            self.save_orderbook_snapshot(orderbook_snapshot, **kwargs)
+
+        self.load_snapshot_to_queue(queue, orderbook_snapshot, depth)
+
+    @staticmethod
+    def load_orderbook_snapshot(snapshot_filepath: Path):
+        logger.debug(f"Loading snapshot from {snapshot_filepath.name}")
+        with gzip.open(snapshot_filepath, 'rt', encoding='UTF-8') as f:
+            snapshot = json.loads(f.read())
+        return snapshot
+
+    @staticmethod
+    def save_orderbook_snapshot(*args, **kwargs):
+        """Save orderbook object as a gzip file."""
+        orderbook_snapshot = args[0]
+        market = kwargs.get("market", "n/a")
+        folder = kwargs.get("save_folder", "data")
+        exchange = kwargs.get("exchange", "exchange")
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        sequence = orderbook_snapshot["sequence"]
+        filename_timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        snapshot_filename = f"{exchange}_orderbook_snapshot_{market}_{sequence}_{filename_timestamp}.json.gz"
+        snapshot_filepath = Path.cwd() / folder / snapshot_filename
+        with gzip.open(snapshot_filepath, 'wt', encoding='UTF-8') as f:
+            f.write(json.dumps(orderbook_snapshot))
+        logger.debug(f"Snapshot saved to {snapshot_filename}.")
+
+    def load_snapshot_to_queue(self, _queue, orderbook_snapshot, depth) -> None:
         msg = "Loading orderbook snapshot into queue. "
         if depth is not None:
             msg += f"Ignoring orders more than {depth} away from best bid/ask."
@@ -81,19 +117,18 @@ class OrderbookSnapshotLoader:
 
 class OrderbookBuilder:
     """Build limit orderbook from msgs in queue"""
-    # Todo: replace with kwargs
     def __init__(
             self,
             queue: q.Queue = None,
             snapshot_order_count: int = 0,
             output_queue: mp.Queue = None,
             save_csv: bool = False,
-            save_hd5: bool = False,
             output_folder: str = 'data',
             save_interval: int = None,
             item_display_flags: dict = None,
+            build_matches: bool = False,
             build_candles: bool = False,
-            load_feed_from_json_file: Path = None,
+            load_feed_filepath: Path = None,
             store_feed_in_memory: bool = False,
             module_timer: Timer = None,
             exchange: str = "Coinbase",
@@ -104,12 +139,9 @@ class OrderbookBuilder:
         self.__market = None
         self.__snapshot_order_count = snapshot_order_count
         self.__save_CSV = save_csv
-        self.__save_HD5 = save_hd5
         self.__output_folder = output_folder
         self.__save_timer = Timer()
         self._save_interval = save_interval
-        self.__build_candles = build_candles
-        self.__json_filepath = load_feed_from_json_file
         self.__store_feed_in_memory = store_feed_in_memory
 
         # misc
@@ -130,24 +162,32 @@ class OrderbookBuilder:
             for item_type in item_display_flags:
                 self.__item_display_flags[item_type] = item_display_flags[item_type]
 
-        # data structures
-        self.lob = LimitOrderBook()
         module_timestamp = self.module_timer.get_start_time(_format="datetime").strftime("%Y%m%d-%H%M%S")
+        # build match dataframe
+        self.__build_matches = build_matches
         self.matches = MatchDataFrame(exchange="Coinbase", timestamp=module_timestamp)
+
+        self.__build_candles = build_candles
+        # build candles dataframe
         self.candles = None
         if build_candles:
             self.candles = CandleDataFrame(exchange="Coinbase", frequency="1T", timestamp=module_timestamp)
-        self.first_sequence = None
-        self.snapshot_sequence = None
-        self.first_websocket_sequence = None
-        self.missing_sequences = []
-        self.prev_sequence = None
-        self.sequence = None
-        self.latest_timestamp = None
+
+        # data structures
+        self.lob = LimitOrderBook()
         self.queue = queue
-        self.backfill_queue = q.Queue()
-        self.backfill_item_count = 0
-        self.backfill_items_processed = 0
+        self.__backfill_queue = q.Queue()
+
+        # queue mode tracking and debugging
+        self.__first_sequence = None
+        self.__snapshot_sequence = None
+        self.__first_websocket_sequence = None
+        self.__missing_sequences = []
+        self.__prev_sequence = None
+        self.__sequence = None
+        self.latest_timestamp = None
+        self.__backfill_item_count = 0
+        self.__backfill_items_processed = 0
 
         self.output_queue = output_queue
         if self.output_queue is not None:
@@ -159,7 +199,7 @@ class OrderbookBuilder:
         self.__queue_empty_timer = Timer()
         self._queue_empty_interval = 60
         self.__queue_stats_timer = Timer()
-        self._queue_stats_interval = 15  # seconds
+        self._queue_stats_interval = 60  # seconds
         self.__queue_stats = defaultdict(list)
         self.__total_queue_items_processed = 0
         self.__total_queue_items_skipped = 0
@@ -173,7 +213,7 @@ class OrderbookBuilder:
         self.__lob_check_count = 0
 
         # queue processing modes, in order
-        self._snapshot_stats_interval = 10
+        self._snapshot_stats_interval = 5
         self.__queue_modes = ("snapshot", "backfill", "websocket", "finish", "stop")
         self.__queue_modes_cycle = cycle(self.__queue_modes)
         self.queue_mode = None
@@ -187,11 +227,15 @@ class OrderbookBuilder:
         # main processing thread
         self.thread = Thread(target=self.__process_queue)
 
-        # used for debugging
-        if load_feed_from_json_file is not None:
-            logger.info(f"Path passed to load_feed_from_json_file. Placing elements in JSON object into queue.")
-            in_data = self.__load_iter_json(load_feed_from_json_file)
-            self.__fill_queue_from_json(in_data, self.queue)
+        # use for running local copies of feeds
+        self.__load_feed = False
+        if load_feed_filepath is not None:
+            self.__load_feed = True
+            msg = "Path passed to load_feed_filepath. "
+            msg += f"Orderbook builder will queue up items from {load_feed_filepath.name}. Ensure websocket is OFF."
+            logger.info(msg)
+            self.__local_feed = gzip.open(load_feed_filepath, 'rt', encoding='UTF-8')
+            logger.debug(f"Opened {load_feed_filepath} with gzip.")
 
         # performance monitoring
         self.total_count = 0
@@ -199,6 +243,24 @@ class OrderbookBuilder:
         self.delays = deque()
         self.stats_queue = stats_queue
         self.stats_queue_interval = stats_queue_interval
+
+    def __load_queue_with_next(self):
+        assert self.__load_feed is True
+        assert not self.__local_feed.closed
+        line = self.__local_feed.readline()
+        if line != '' and line is not None:
+            # logger.debug(f"line = '{line}'")
+            try:
+                item = json.loads(line)
+                # logger.debug(f"putting item in queue = {item}")
+            except json.decoder.JSONDecodeError as e:
+                logger.critical(f"JSONDecodeError from line '{line}'")
+            else:
+                self.queue.put(item)
+
+    def __close_feed_file(self):
+        if self.__load_feed and not self.__local_feed.closed:
+            self.__local_feed.close()
 
     def __next_queue_mode(self):
         self.queue_mode = next(self.__queue_modes_cycle)
@@ -212,11 +274,6 @@ class OrderbookBuilder:
             while self.queue_mode != mode:
                 self.__next_queue_mode()
 
-    def __cycle_to_queue_mode(self, mode: str):
-        """Similar to __skip_to_next_queue_mode but allows for setting mode back to snapshot."""
-        assert mode in self.__queue_modes
-        # Todo
-
     def finish(self):
         self.__skip_to_next_queue_mode("finish")
         logger.info(f"Wrapping up the queue... Remaining items: {self.queue.qsize()}")
@@ -224,113 +281,6 @@ class OrderbookBuilder:
     def stop(self):
         self.__skip_to_next_queue_mode("stop")
         logger.debug(f"Stop called. Skipping any remaining items in queue.")
-
-    @staticmethod
-    def __load_iter_json(json_filepath: Path):
-        with open(json_filepath, 'r') as f:
-            return iter(json.load(f))
-
-    @staticmethod
-    def __fill_queue_from_json(in_data: iter, queue: q.Queue):
-        """Use when LOAD_FEED_FROM_JSON is True to build a queue from iterable."""
-        while True:
-            item = next(in_data, None)
-            if item is not None:
-                queue.put(item)
-            else:
-                break
-
-    def __get_queue_stats(
-            self, track_average: bool = False, track_delay: bool = False,
-            snapshot_mode: bool = False) -> None:
-
-        msg = ''
-
-        if track_average:
-            self.__queue_stats["time"].append(self.__timer.elapsed())
-            self.__queue_stats["queue_sizes"].append(self.queue.qsize())
-            avg_qsize = sum(self.__queue_stats["queue_sizes"]) / len(self.__queue_stats["queue_sizes"])
-            logger.info(f"Average queue size over {self.__timer.elapsed(hms_format=True)}: {avg_qsize:.2f}")
-            self.__queue_stats["avg_qsize"].append(avg_qsize)
-            # keep track of the last 1000 queue sizes (so 10k seconds)
-            self.__queue_stats["queue_sizes"] = self.__queue_stats["queue_sizes"][-1000:]
-            self.__queue_stats["avg_qsize"] = self.__queue_stats["avg_qsize"][-1000:]
-
-        if track_delay and self.latest_timestamp is not None:
-            delta = max(datetime.utcnow() - self.latest_timestamp, timedelta(0))
-            logger.info(f"Script is {delta} seconds behind.")
-            self.__queue_stats["delta"].append(delta)
-            self.__queue_stats["delta"] = self.__queue_stats["delta"][-1000:]  # limit to 1000 measurements
-
-        if snapshot_mode:
-            snapshot_orders = self.__snapshot_order_count - self.lob.items_processed
-            msg += f"Snapshot orders left = {snapshot_orders}. "
-
-        msg += f"Queue size = {self.queue.qsize()}."
-        logger.info(msg)
-
-        delta = datetime.utcnow() - self.__last_timestamp
-        # logger.debug(delta.total_seconds())
-        if delta.total_seconds() > 0.1:
-            dones_per_sec = self.count // delta.total_seconds()
-            logger.info(f"Items processed per second = {dones_per_sec:,}")
-            self.__last_timestamp = datetime.utcnow()
-
-    @run_once_per_interval("_queue_stats_interval")
-    def __timed_get_queue_stats(self, *args, **kwargs):
-        self.__get_queue_stats(*args, **kwargs)
-
-    @run_once_per_interval("_snapshot_stats_interval")
-    def __track_snapshot_load(self):
-        self.__get_queue_stats(snapshot_mode=True)
-
-    def __save_dataframes(self, final: bool = False) -> None:
-        if not (self.__save_CSV or self.__save_HD5):
-            return
-        logger.info(f"Saving dataframes. Time elapsed: {self.module_timer.elapsed(_format='hms')}")
-
-        if isinstance(self.matches, MatchDataFrame) and not self.matches.is_empty:
-            self.matches.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
-            if not self.__store_feed_in_memory:
-                self.matches.clear()
-
-        if isinstance(self.candles, CandleDataFrame) and not self.candles.is_empty:
-            self.candles.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
-            if not self.__store_feed_in_memory:
-                self.candles.clear()
-
-    @run_once_per_interval("_save_interval")
-    def __timed_save_dataframes(self, *args, **kwargs) -> None:
-        self.__save_dataframes(*args, **kwargs)
-
-    def save_orderbook_snapshot(self) -> None:
-        # Todo: build a custom JSON encoder for orderbook class
-        last_timestamp = datetime.strftime(self.latest_timestamp, "%Y%m%d-%H%M%S")
-        json_filename = f"coinbase_{self.__market}_orderbook_snapshot_{last_timestamp}.json"
-        json_filepath = Path.cwd() / self.__output_folder / json_filename
-        with open(json_filepath, 'w', encoding='UTF-8') as f:
-            json.dump(self.lob, f, indent=4)
-        logger.info(f"Saved orderbook snapshot into {json_filepath.name}")
-
-    def __save(self, timed: bool = False, *args, **kwargs) -> None:
-        if timed:
-            self.__timed_save_dataframes(*args, **kwargs)
-        else:
-            self.__save_dataframes(*args, **kwargs)
-        # Todo: add __save_orderbook_snapshot
-
-    @run_once_per_interval("_lob_check_interval")
-    def __timed_lob_check(self) -> None:
-        if not self.__lob_checked:
-            logger.info(f"Checking orderbook validity...", end='')
-            self.lob.check()
-            self.__lob_checked = True
-            logger.info(f"Orderbook checked.")
-            self.__lob_check_count += 1
-
-    @run_once_per_interval("_queue_empty_interval")
-    def __timed_queue_empty_note(self) -> None:
-        logger.info(f"Queue empty...")
 
     def __check_main_thread(self):
         """Check on main thread and choose next queue mode if main thread broke."""
@@ -345,77 +295,11 @@ class OrderbookBuilder:
             self.__next_queue_mode()
 
     def __check_backfill_done(self):
-        if self.backfill_queue.empty():
-            msg = f"Backfill processed. {self.backfill_items_processed} out of "
-            msg += f"{self.backfill_item_count} had a valid sequence."
+        if self.__backfill_queue.empty():
+            msg = f"Backfill processed. {self.__backfill_items_processed} out of "
+            msg += f"{self.__backfill_item_count} had a valid sequence."
             logger.info(msg)
             self.__next_queue_mode()
-
-    # Todo: condense next three methods into one
-    @run_once
-    def __log_first_sequence(self, sequence=None):
-        """Store first sequence."""
-        if sequence is None and self.sequence is not None:
-            sequence = copy.deepcopy(self.sequence)
-        self.first_sequence = sequence
-        logger.debug(f"First sequence = {self.first_sequence}")
-
-    @run_once
-    def __log_snapshot_sequence(self, sequence=None):
-        """Store snapshot sequence."""
-        if sequence is None and self.sequence is not None:
-            sequence = copy.deepcopy(self.sequence)
-        self.snapshot_sequence = sequence
-        logger.debug(f"Snapshot sequence = {self.snapshot_sequence}")
-
-    @run_once
-    def __log_first_websocket_sequence(self, sequence=None):
-        """Store first websocket sequence."""
-        if sequence is None and self.sequence is not None:
-            sequence = copy.deepcopy(self.sequence)
-        self.first_websocket_sequence = sequence
-        logger.debug(f"Websocket sequence = {self.first_websocket_sequence}")
-
-    def __log_missing_sequences(self, start: int, end: int) -> int:
-        """Logs missing sequences into log and list object, and returns count of marginal missing sequences"""
-        missing_range = range(0, 0)
-        if None not in (start, end):
-            missing_range = range(start + 1, end)
-            # logger.debug(f"missing_range = {missing_range}, length = {len(missing_range)}")
-            if len(missing_range) != 0:
-                logger.warning(f"Missing {len(missing_range)} sequences: {missing_range}")
-                self.missing_sequences.extend(missing_range)
-        return len(missing_range)
-
-    @run_once
-    def __log_post_snapshot_missing_sequences(self):
-        """Assumes websocket starts feeding data before snapshot"""
-        # logger.debug(f"calling __log_missing_sequences on start={self.snapshot_sequence}, end={self.first_sequence}")
-        count = self.__log_missing_sequences(self.snapshot_sequence, self.first_sequence)
-        if count > 0:
-            msg = f"Snapshot sequence is too early! Increase delay between opening websocket and requesting snapshot."
-            logger.warning(msg)
-        else:
-            msg = f"Snapshot sequence is after first sequence from websocket -> OK."
-            logger.debug(msg)
-
-    @run_once
-    def __log_processing_backfill(self):
-        if self.backfill_queue.qsize() != 0:
-            logger.info(f"Processing {self.backfill_queue.qsize()} items in backfill queue...")
-            self.backfill_item_count = self.backfill_queue.qsize()
-
-    # Todo: Find a way to show starting and ending sequence in a single line
-    @run_once_per_interval(0.1)
-    def __log_backfilling(self, sequence):
-        msg = f"Non-snapshot item (sequence {sequence}) provided in snapshot mode. Placing into backfill queue..."
-        logger.debug(msg)
-
-    def __log_invalid_sequence(self, sequence, item):
-        if self.queue_mode != 'backfill':
-            msg = f"Item below provided out of sequence (current={self.sequence}, provided={sequence})"
-            logger.warning(msg)
-            logger.warning(f"{item}")
 
     def __check_finished(self):
         if self.queue.empty():
@@ -439,7 +323,7 @@ class OrderbookBuilder:
 
             if backfill:
                 try:
-                    item = self.backfill_queue.get(block=False)
+                    item = self.__backfill_queue.get(block=False)
                 except q.Empty:
                     raise q.Empty
 
@@ -460,12 +344,6 @@ class OrderbookBuilder:
                 self.__track_perf_data()
                 self.__lob_checked = False
 
-            # finally:
-            #     if backfill:
-            #         self.backfill_queue.task_done()
-            #     else:
-            #         self.queue.task_done()
-
         except q.Empty as e:
             raise q.Empty
 
@@ -480,6 +358,9 @@ class OrderbookBuilder:
 
         while True:
 
+            if self.__load_feed and self.queue_mode not in {'finish', 'stop'}:
+                self.__load_queue_with_next()
+
             self.__check_main_thread()
 
             match self.queue_mode:
@@ -487,7 +368,7 @@ class OrderbookBuilder:
                 case "snapshot":
 
                     # check for missing sequences between snapshot and start of websocket
-                    if None not in (self.snapshot_sequence, self.first_sequence):  # redundant None check due to @run_once
+                    if None not in (self.__snapshot_sequence, self.__first_sequence):  # redundant None check due to @run_once
                         self.__log_post_snapshot_missing_sequences()
 
                     try:
@@ -521,9 +402,13 @@ class OrderbookBuilder:
                     except q.Empty:
                         self.__timed_queue_empty_note()
                         self.__timed_lob_check()
+
+                        if self.__load_feed:
+                            self.__next_queue_mode()
+
                     else:
                         self.__output_perf_data()
-                        # self.__timed_get_queue_stats(track_delay=True)
+                        self.__timed_get_queue_stats(track_delay=True)
                         self.__save(timed=True)
 
                 case "finish":
@@ -538,13 +423,16 @@ class OrderbookBuilder:
                 case "stop":
                     self.__end_output_data()
                     self.__end_perf_data()
-                    self.__save_dataframes(final=True)
+                    self.__save(final=True)
                     self.__log_summary()
                     self.__clear_queues_and_exit()
+                    self.__close_feed_file()
                     logger.info("Orderbook builder has finished.")
                     break
 
     def __process_item(self, item: dict, output_data: bool = True, *args, **kwargs) -> None:
+
+        # logger.debug(f"processing item = {item}")
 
         snapshot = kwargs.get("snapshot", False)
         backfill = kwargs.get("backfill", False)
@@ -564,10 +452,10 @@ class OrderbookBuilder:
 
         is_bid = True if side == "buy" else False
 
-        if self.first_sequence is None and sequence is not None:
+        if self.__first_sequence is None and sequence is not None:
             self.__log_first_sequence(sequence)
 
-        if self.first_websocket_sequence is None and sequence is not None and not snapshot and not backfill:
+        if self.__first_websocket_sequence is None and sequence is not None and not snapshot and not backfill:
             self.__log_first_websocket_sequence(sequence)
 
         # item validity checks ---------------------------------------------------------
@@ -577,21 +465,21 @@ class OrderbookBuilder:
         # or if snapshot is True and the item passed wasn't a snapshot (to sync snapshot with websocket)
 
         if sequence is None or \
-                (self.sequence is not None and sequence <= self.sequence) or \
+                (self.__sequence is not None and sequence <= self.__sequence) or \
                 (snapshot and item_type != "snapshot"):
             valid_sequence = False
         else:
-            self.prev_sequence = self.sequence
-            self.sequence = sequence
+            self.__prev_sequence = self.__sequence
+            self.__sequence = sequence
 
             # check for missing sequences
-            if self.prev_sequence is not None and self.sequence != self.prev_sequence + 1:
-                self.__log_missing_sequences(self.prev_sequence, self.sequence)
+            if self.__prev_sequence is not None and self.__sequence != self.__prev_sequence + 1:
+                self.__log_missing_sequences(self.__prev_sequence, self.__sequence)
 
         match item_type:
             case "snapshot":
                 valid_sequence = True  # all snapshot items have the same sequence
-                if self.snapshot_sequence is None:
+                if self.__snapshot_sequence is None:
                     self.__log_snapshot_sequence(sequence)
             case "received":
                 if None in {item_type, order_id}:
@@ -688,7 +576,11 @@ class OrderbookBuilder:
 
             # process trades
             case "match" if valid_sequence:
-                self.matches.process_item(item, display_match=self.__item_display_flags[item_type])
+                self.matches.process_item(
+                    item,
+                    display_match=self.__item_display_flags[item_type],
+                    store_in_df=self.__build_matches
+                )
                 if self.__build_candles:
                     self.candles.process_item(item)
 
@@ -696,7 +588,7 @@ class OrderbookBuilder:
             # valid_sequence is false when queue mode is snapshot and item_type is not snapshot
             case _ if not valid_sequence and snapshot:
                 self.__log_backfilling(sequence)
-                self.backfill_queue.put(item)
+                self.__backfill_queue.put(item)
 
             case _ if not valid_sequence:
                 self.__log_invalid_sequence(sequence, item)
@@ -707,7 +599,7 @@ class OrderbookBuilder:
                 raise ValueError("Unhandled msg type")
 
         if backfill and valid_sequence:
-            self.backfill_items_processed += 1
+            self.__backfill_items_processed += 1
 
     def output_data(self):
         # Using try-except as in __end_output_data() results in latency climb
@@ -716,7 +608,7 @@ class OrderbookBuilder:
             bid_levels, ask_levels = self.lob.levels
             data = {
                 "timestamp": timestamp,
-                "sequence": self.sequence,
+                "sequence": self.__sequence,
                 "bid_levels": bid_levels,
                 "ask_levels": ask_levels
             }
@@ -727,7 +619,8 @@ class OrderbookBuilder:
     def __end_output_data(self):
         if self.output_queue is not None:
             try:
-                self.output_queue.put(None, block=False)
+                # self.output_queue.put(None, block=False)
+                self.output_queue.put(None)
             except q.Full:
                 pass
             else:
@@ -795,11 +688,156 @@ class OrderbookBuilder:
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
             logger.info(f"Total items processed from queue = {self.total_count:,}")
 
-        if len(self.missing_sequences) != 0:
-            logger.warning(f"{len(self.missing_sequences)} missing sequences.")
+        if len(self.__missing_sequences) != 0:
+            logger.warning(f"{len(self.__missing_sequences)} missing sequences.")
 
         # Todo: Add more
 
         logger.info(f"________________________________ Summary End ________________________________")
 
+    @run_once
+    def __log_first_sequence(self, sequence=None):
+        """Store first sequence."""
+        if sequence is None and self.__sequence is not None:
+            sequence = copy.deepcopy(self.__sequence)
+        self.__first_sequence = sequence
+        logger.debug(f"First sequence = {self.__first_sequence}")
 
+    @run_once
+    def __log_snapshot_sequence(self, sequence=None):
+        """Store snapshot sequence."""
+        if sequence is None and self.__sequence is not None:
+            sequence = copy.deepcopy(self.__sequence)
+        self.__snapshot_sequence = sequence
+        logger.debug(f"Snapshot sequence = {self.__snapshot_sequence}")
+
+    # Todo: condense next three methods into one
+    @run_once
+    def __log_first_websocket_sequence(self, sequence=None):
+        """Store first websocket sequence."""
+        if sequence is None and self.__sequence is not None:
+            sequence = copy.deepcopy(self.__sequence)
+        self.__first_websocket_sequence = sequence
+        logger.debug(f"Websocket sequence = {self.__first_websocket_sequence}")
+
+    def __log_missing_sequences(self, start: int, end: int) -> int:
+        """Logs missing sequences into log and list object, and returns count of marginal missing sequences"""
+        missing_range = range(0, 0)
+        if None not in (start, end):
+            missing_range = range(start + 1, end)
+            # logger.debug(f"missing_range = {missing_range}, length = {len(missing_range)}")
+            if len(missing_range) != 0:
+                logger.warning(f"Missing {len(missing_range)} sequences: {missing_range}")
+                self.__missing_sequences.extend(missing_range)
+        return len(missing_range)
+
+    @run_once
+    def __log_post_snapshot_missing_sequences(self):
+        """Assumes websocket starts feeding data before snapshot"""
+        # logger.debug(f"calling __log_missing_sequences on start={self.snapshot_sequence}, end={self.first_sequence}")
+        count = self.__log_missing_sequences(self.__snapshot_sequence, self.__first_sequence)
+        if count > 0:
+            msg = f"Snapshot sequence is too early! Increase delay between opening websocket and requesting snapshot."
+            logger.warning(msg)
+        else:
+            msg = f"Snapshot sequence is after first sequence from websocket -> OK."
+            logger.debug(msg)
+
+    @run_once
+    def __log_processing_backfill(self):
+        if self.__backfill_queue.qsize() != 0:
+            logger.info(f"Processing {self.__backfill_queue.qsize()} items in backfill queue...")
+            self.__backfill_item_count = self.__backfill_queue.qsize()
+
+    @run_once_per_interval(0.1)
+    def __log_backfilling(self, sequence):
+        msg = f"Non-snapshot item (sequence {sequence}) provided in snapshot mode. Placing into backfill queue..."
+        logger.debug(msg)
+
+    def __log_invalid_sequence(self, sequence, item):
+        if self.queue_mode != 'backfill':
+            msg = f"Item below provided out of sequence (current={self.__sequence}, provided={sequence})"
+            logger.warning(msg)
+            logger.warning(f"{item}")
+
+    def __save_dataframes(self, final: bool = False) -> None:
+        if not self.__save_CSV:
+            return
+        logger.info(f"Saving dataframes. Time elapsed: {self.module_timer.elapsed(_format='hms')}")
+
+        if isinstance(self.matches, MatchDataFrame) and not self.matches.is_empty:
+            self.matches.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
+            if not self.__store_feed_in_memory:
+                self.matches.clear()
+
+        if isinstance(self.candles, CandleDataFrame) and not self.candles.is_empty:
+            self.candles.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
+            if not self.__store_feed_in_memory:
+                self.candles.clear()
+
+    @run_once_per_interval("_save_interval")
+    def __timed_save_dataframes(self, *args, **kwargs) -> None:
+        self.__save_dataframes(*args, **kwargs)
+
+    def __save(self, timed: bool = False, *args, **kwargs) -> None:
+        if timed:
+            self.__timed_save_dataframes(*args, **kwargs)
+        else:
+            self.__save_dataframes(*args, **kwargs)
+
+    @run_once_per_interval("_lob_check_interval")
+    def __timed_lob_check(self) -> None:
+        if not self.__lob_checked:
+            logger.info(f"Checking orderbook validity...", end='')
+            self.lob.check()
+            self.__lob_checked = True
+            logger.info(f"Orderbook checked.")
+            self.__lob_check_count += 1
+
+    @run_once_per_interval("_queue_empty_interval")
+    def __timed_queue_empty_note(self) -> None:
+        logger.info(f"Queue empty...")
+
+    def __get_queue_stats(
+            self, track_average: bool = False, track_delay: bool = False,
+            snapshot_mode: bool = False) -> None:
+
+        msg = ''
+
+        if track_average:
+            self.__queue_stats["time"].append(self.__timer.elapsed())
+            self.__queue_stats["queue_sizes"].append(self.queue.qsize())
+            avg_qsize = sum(self.__queue_stats["queue_sizes"]) / len(self.__queue_stats["queue_sizes"])
+            logger.info(f"Average queue size over {self.__timer.elapsed(hms_format=True)}: {avg_qsize:.2f}")
+            self.__queue_stats["avg_qsize"].append(avg_qsize)
+            # keep track of the last 1000 queue sizes (so 10k seconds)
+            self.__queue_stats["queue_sizes"] = self.__queue_stats["queue_sizes"][-1000:]
+            self.__queue_stats["avg_qsize"] = self.__queue_stats["avg_qsize"][-1000:]
+
+        if track_delay and self.latest_timestamp is not None:
+            delta = max(datetime.utcnow() - self.latest_timestamp, timedelta(0))
+            logger.info(f"Script is {delta} seconds behind.")
+            self.__queue_stats["delta"].append(delta)
+            self.__queue_stats["delta"] = self.__queue_stats["delta"][-1000:]  # limit to 1000 measurements
+
+        if snapshot_mode:
+            snapshot_orders = self.__snapshot_order_count - self.lob.items_processed
+            msg += f"Snapshot orders left = {snapshot_orders}. "
+
+        msg += f"Queue size = {self.queue.qsize()}."
+        logger.info(msg)
+
+        delta = datetime.utcnow() - self.__last_timestamp
+        # logger.debug(delta.total_seconds())
+        if delta.total_seconds() > 0.1:
+            dones_per_sec = self.count // delta.total_seconds()
+            logger.info(f"Items processed per second = {dones_per_sec:,}")
+            self.__last_timestamp = datetime.utcnow()
+
+    @run_once_per_interval("_queue_stats_interval")
+    def __timed_get_queue_stats(self, *args, **kwargs):
+        self.__get_queue_stats(*args, **kwargs)
+
+    @run_once_per_interval("_snapshot_stats_interval")
+    def __track_snapshot_load(self):
+        self.__get_queue_stats(snapshot_mode=True)

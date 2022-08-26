@@ -13,14 +13,12 @@ from pathlib import Path
 import time
 import easygui
 import multiprocessing as mp
-import pandas as pd
-pd.options.display.float_format = '{:.6f}'.format
 
 # homebrew modules
 from api_coinbase import CoinbaseAPI
 from api_coinbase_pro import CoinbaseProAPI
 from websockets_coinbase import WebsocketClient, WebsocketClientHandler
-from orderbook_builder import OrderbookBuilder, OrderbookSnapshotLoader
+from orderbook_builder import OrderbookBuilder, OrderbookSnapshotHandler
 from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
 import plotting.depth_chart_mpl as dpth
@@ -31,8 +29,16 @@ import plotting.performance_chart as perf
 
 WEBHOOK_ONLY = False
 
-DUMP_FEED_INTO_JSON = False
-LOAD_FEED_FROM_JSON = False  # If true, no webhook
+ENABLE_SNAPSHOT = True
+
+SAVE_FEED = True
+SAVE_ORDERBOOK_SNAPSHOT = True
+
+LOAD_LOCAL_DATA = True  # If true, no webhook. Load orderbook snapshot and websocket feed from local files below
+FEED_FILEPATH \
+    = 'data/08-25-2022_Coinbase_ETH-USD/coinbase_full_ETH-USD_dump_20220825-220955.json.gz'
+SNAPSHOT_FILEPATH \
+    = 'data/08-25-2022_Coinbase_ETH-USD/coinbase_orderbook_snapshot_ETH-USD_34677807576_20220825-221013.json.gz'
 
 ITEM_DISPLAY_FLAGS = {
     "received": False,
@@ -41,26 +47,21 @@ ITEM_DISPLAY_FLAGS = {
     "match": True,
     "change": False
 }
-LOAD_ORDERBOOK_SNAPSHOT = True
 # Coinbase snapshot tends to provide a sequence earlier than where websocket starts
 SNAPSHOT_GET_DELAY = 0.75  # in seconds.
 
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
+BUILD_MATCHES = False
 BUILD_CANDLES = False
-PLOT_DEPTH_CHART = True
-OUTPUT_FOLDER = 'data'
-
-# for simulating feed
-LOAD_FEED_FROM_JSON_FILEPATH = Path.cwd() / OUTPUT_FOLDER / "full_SNX-USD_dump_20220807-021730.json"
+PLOT_DEPTH_CHART = False
 
 CANDLE_FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
 SAVE_CSV = False
-SAVE_HD5 = False  # Todo: Test this
 SAVE_INTERVAL = 360
 STORE_FEED_IN_MEMORY = False
 
-PLOT_PERFORMANCE = True
+PLOT_PERFORMANCE = False
 PERF_PLOT_INTERVAL = 0.05  # output to performance plotter queue every interval seconds
 PERF_PLOT_WINDOW = 20  # in seconds (approximate)
 
@@ -110,15 +111,13 @@ if __name__ == '__main__':
     cb_api = CoinbaseAPI()  # used for authenticated websocket
     cbp_api = CoinbaseProAPI()  # used for rest API calls
 
-    # ensure 'data' output folder exists
-    Path('data').mkdir(parents=True, exist_ok=True)
+    # ensure output folder exists
+    OUTPUT_DIRECTORY = Path.cwd() / 'data' / f'{datetime.now().strftime("%m-%d-%Y")}_{EXCHANGE}_{MARKETS[0]}'
+    if SAVE_CSV or SAVE_FEED or SAVE_ORDERBOOK_SNAPSHOT:
+        OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
     # main queue between websocket client and orderbook builder
     data_queue = queue.Queue()
-
-    # multiprocessing manager
-    # process_mgr = mp.Manager()
-    # mgr_list = process_mgr.list()
 
     # start depth chart in separate process
     depth_chart_queue = None
@@ -128,7 +127,7 @@ if __name__ == '__main__':
         depth_chart_queue = mp.Queue(maxsize=1)
         # assert hasattr(depth_chart_queue, "_maxsize")
         args = (depth_chart_queue, )
-        kwargs = {"title": f"Coinbase - {MARKETS[0]}", }
+        kwargs = {"title": f"{EXCHANGE} - {MARKETS[0]}", }
         # noinspection PyRedeclaration
         depth_chart_process = mp.Process(
             target=dpth.initialize_plotter,
@@ -143,7 +142,10 @@ if __name__ == '__main__':
     perf_plot_queue = None
     perf_plot_process = None
     if PLOT_PERFORMANCE:
-        window = int(PERF_PLOT_WINDOW / PERF_PLOT_INTERVAL)
+        if PERF_PLOT_INTERVAL == 0:
+            window = int(PERF_PLOT_WINDOW / 0.01)
+        else:
+            window = int(PERF_PLOT_WINDOW / PERF_PLOT_INTERVAL)
         logger.debug(f"Setting performance plot window to {window} points.")
         # noinspection PyRedeclaration
         perf_plot_queue = mp.Queue()
@@ -161,8 +163,7 @@ if __name__ == '__main__':
 
     # handle websocket threads
     ws_handler = None
-    if not LOAD_FEED_FROM_JSON:
-        LOAD_FEED_FROM_JSON_FILEPATH = None
+    if not LOAD_LOCAL_DATA:
         # noinspection PyRedeclaration
         ws_handler = WebsocketClientHandler()
 
@@ -172,10 +173,11 @@ if __name__ == '__main__':
                     api=cb_api,
                     channel=channel,
                     market=market,
+                    exchange=EXCHANGE,
                     data_queue=data_queue,
                     endpoint=ENDPOINT,
-                    dump_feed=DUMP_FEED_INTO_JSON,
-                    output_folder=OUTPUT_FOLDER,
+                    save_feed=SAVE_FEED,
+                    output_folder=OUTPUT_DIRECTORY,
                     module_timer=module_timer,
                     stats_queue=perf_plot_queue,
                     stats_queue_interval=PERF_PLOT_INTERVAL,
@@ -183,37 +185,54 @@ if __name__ == '__main__':
                 start_immediately=True
             )
 
-    # Todo: have orderbook builder ignore all sequences before snapshot is complete, when in snapshot mode
-
     # load orderbook snapshot into queue
     snapshot_order_count = 0
-    if not WEBHOOK_ONLY and LOAD_ORDERBOOK_SNAPSHOT:
+    if not WEBHOOK_ONLY and ENABLE_SNAPSHOT:
         if SNAPSHOT_GET_DELAY != 0:
             logger.debug(f"Delaying orderbook snapshot request by {SNAPSHOT_GET_DELAY} seconds...")
             time.sleep(SNAPSHOT_GET_DELAY)
-        orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
-        snapshot_loader = OrderbookSnapshotLoader(
+
+        orderbook_snapshot = None
+        snapshot_filepath = None
+        if not LOAD_LOCAL_DATA:
+            # noinspection PyRedeclaration
+            orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
+        else:
+            # noinspection PyRedeclaration
+            snapshot_filepath = Path.cwd() / SNAPSHOT_FILEPATH
+
+        snapshot_loader = OrderbookSnapshotHandler(
             queue=data_queue,
             depth=ORDERBOOK_SNAPSHOT_DEPTH,
-            orderbook_snapshot=orderbook_snapshot
+            orderbook_snapshot=orderbook_snapshot,
+            save=SAVE_ORDERBOOK_SNAPSHOT and not LOAD_LOCAL_DATA,
+            market=MARKETS[0],
+            save_folder=OUTPUT_DIRECTORY,
+            snapshot_filepath=snapshot_filepath,
+            exchange=EXCHANGE,
         )
+
         # noinspection PyRedeclaration
         snapshot_order_count = snapshot_loader.order_count
 
     # initialize depth_chart and queue_worker if not webhook-only mode
     orderbook_builder = None
     if not WEBHOOK_ONLY:
+        if LOAD_LOCAL_DATA:
+            load_feed_filepath = Path.cwd() / FEED_FILEPATH
+        else:
+            load_feed_filepath = None
         # noinspection PyRedeclaration
         orderbook_builder = OrderbookBuilder(
             queue=data_queue,
             snapshot_order_count=snapshot_order_count,
             output_queue=depth_chart_queue,
             save_csv=SAVE_CSV,
-            save_hd5=SAVE_HD5,
             save_interval=SAVE_INTERVAL,
             item_display_flags=ITEM_DISPLAY_FLAGS,
+            build_matches=BUILD_MATCHES,
             build_candles=BUILD_CANDLES,
-            load_feed_from_json_file=LOAD_FEED_FROM_JSON_FILEPATH,
+            load_feed_filepath=load_feed_filepath,
             store_feed_in_memory=STORE_FEED_IN_MEMORY,
             module_timer=module_timer,
             exchange=EXCHANGE,
@@ -236,12 +255,17 @@ if __name__ == '__main__':
     # keep main() from ending before threads are shut down, unless queue worker broke
     while not killer.kill_now:
 
-        # send kill thread signal if queue worker breaks
+        # send kill thread signal if orderbook builder breaks
         if orderbook_builder is not None and not orderbook_builder.thread.is_alive():
             killer.kill_now = True
 
+        # send kill thread signal if any websockets break
         if ws_handler is not None and not ws_handler.all_threads_alive():
             logger.critical(f"Not all websocket threads alive!")
+            killer.kill_now = True
+
+        # send kill thread signal if orderbook builder finishes
+        if orderbook_builder.queue_mode == "stop":
             killer.kill_now = True
 
         time.sleep(1)
@@ -287,11 +311,15 @@ if __name__ == '__main__':
 
     # if performance plot or depth chart closed before main process,
     # script will hang at end because of QueueFeederThreads, so need to clear queues again.
-    while not perf_plot_queue.empty():
-        perf_plot_queue.get()
-    while not depth_chart_queue.empty():
-        depth_chart_queue.get()
-    depth_chart_queue.close()
+    if perf_plot_queue is not None:
+        while not perf_plot_queue.empty():
+            perf_plot_queue.get()
+        perf_plot_queue.close()
+
+    if depth_chart_queue is not None:
+        while not depth_chart_queue.empty():
+            depth_chart_queue.get()
+        depth_chart_queue.close()
 
     # logger.debug(f"perf_plot_queue.qsize() = {perf_plot_queue.qsize()}")
     # logger.debug(f"depth_chart_queue.qsize() = {depth_chart_queue.qsize()}")
