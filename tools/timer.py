@@ -44,7 +44,6 @@ def time_formatter(func):
 
 class Timer:
     def __init__(self) -> None:
-        self.start_time = None
         self.__start_time = None
         self.__last_time = None
 

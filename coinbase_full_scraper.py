@@ -2,8 +2,7 @@
 # Todo: Build multi-market support
 
 from loguru import logger
-
-logger.remove()  # remove default logger
+import os
 
 from datetime import datetime
 import queue
@@ -24,6 +23,8 @@ from tools.timer import Timer
 import plotting.depth_chart_mpl as dpth
 import plotting.performance_chart as perf
 
+os.system('color')
+
 # ======================================================================================
 # Script Parameters
 
@@ -31,14 +32,14 @@ WEBHOOK_ONLY = False
 
 ENABLE_SNAPSHOT = True
 
-SAVE_FEED = True
-SAVE_ORDERBOOK_SNAPSHOT = True
+SAVE_FEED = False
+SAVE_ORDERBOOK_SNAPSHOT = False
 
-LOAD_LOCAL_DATA = True  # If true, no webhook. Load orderbook snapshot and websocket feed from local files below
+LOAD_LOCAL_DATA = False  # If true, no webhook. Load orderbook snapshot and websocket feed from local files below
 FEED_FILEPATH \
-    = 'data/08-25-2022_Coinbase_ETH-USD/coinbase_full_ETH-USD_dump_20220825-220955.json.gz'
+    = 'data/08-26-2022_Coinbase_ETH-USD/Coinbase_full_ETH-USD_dump_20220826-065732.json.gz'
 SNAPSHOT_FILEPATH \
-    = 'data/08-25-2022_Coinbase_ETH-USD/coinbase_orderbook_snapshot_ETH-USD_34677807576_20220825-221013.json.gz'
+    = 'data/08-26-2022_Coinbase_ETH-USD/Coinbase_orderbook_snapshot_ETH-USD_34709854791_20220826-065735.json.gz'
 
 ITEM_DISPLAY_FLAGS = {
     "received": False,
@@ -51,36 +52,42 @@ ITEM_DISPLAY_FLAGS = {
 SNAPSHOT_GET_DELAY = 0.75  # in seconds.
 
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
+BUILD_ORDERBOOK = False
 BUILD_MATCHES = False
 BUILD_CANDLES = False
-PLOT_DEPTH_CHART = False
+PLOT_DEPTH_CHART = True
 
 CANDLE_FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
-SAVE_CSV = False
+SAVE_MATCHES = False
+SAVE_CANDLES = False
 SAVE_INTERVAL = 360
-STORE_FEED_IN_MEMORY = False
+KEEP_FEED_IN_MEMORY = False
 
-PLOT_PERFORMANCE = False
+PLOT_PERFORMANCE = True
 PERF_PLOT_INTERVAL = 0.05  # output to performance plotter queue every interval seconds
 PERF_PLOT_WINDOW = 20  # in seconds (approximate)
+
+SUBFOLDER = '08-26-2022_Coinbase_ETH-USD'  # override output subfolder (default = None)
 
 # ======================================================================================
 # Webhook Parameters
 
 EXCHANGE = "Coinbase"
 ENDPOINT = 'wss://ws-feed.exchange.coinbase.com'
-MARKETS = ('ETH-USD',)
-CHANNELS = ('full',)
+MARKET = 'ETH-USD'
+CHANNEL = 'full'
 # MARKETS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
 #           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
 
 # ======================================================================================
 # Configure logger
 
+logger.remove()  # remove default logger
+
 # # add file logger with full debug
 # logger.add(
-#     "logs\\coinbase_webhook_match_log_{time}.log", level="DEBUG"
+#     "logs\\coinbase_full_scraper_log_{time}.log", level="DEBUG", rotation="10 MB"
 # )
 
 # add console logger with formatting
@@ -112,8 +119,9 @@ if __name__ == '__main__':
     cbp_api = CoinbaseProAPI()  # used for rest API calls
 
     # ensure output folder exists
-    OUTPUT_DIRECTORY = Path.cwd() / 'data' / f'{datetime.now().strftime("%m-%d-%Y")}_{EXCHANGE}_{MARKETS[0]}'
-    if SAVE_CSV or SAVE_FEED or SAVE_ORDERBOOK_SNAPSHOT:
+    SUBFOLDER = f'{datetime.now().strftime("%m-%d-%Y")}_{EXCHANGE}_{MARKET}' if SUBFOLDER is None else SUBFOLDER
+    OUTPUT_DIRECTORY = Path.cwd() / 'data' / SUBFOLDER
+    if SAVE_MATCHES or SAVE_FEED or SAVE_ORDERBOOK_SNAPSHOT:
         OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
     # main queue between websocket client and orderbook builder
@@ -122,12 +130,12 @@ if __name__ == '__main__':
     # start depth chart in separate process
     depth_chart_queue = None
     depth_chart_process = None
-    if PLOT_DEPTH_CHART:
+    if PLOT_DEPTH_CHART and BUILD_ORDERBOOK:
         # noinspection PyRedeclaration
         depth_chart_queue = mp.Queue(maxsize=1)
         # assert hasattr(depth_chart_queue, "_maxsize")
         args = (depth_chart_queue, )
-        kwargs = {"title": f"{EXCHANGE} - {MARKETS[0]}", }
+        kwargs = {"title": f"{EXCHANGE} - {MARKET}", }
         # noinspection PyRedeclaration
         depth_chart_process = mp.Process(
             target=dpth.initialize_plotter,
@@ -167,23 +175,22 @@ if __name__ == '__main__':
         # noinspection PyRedeclaration
         ws_handler = WebsocketClientHandler()
 
-        for i, (market, channel) in enumerate(itertools.product(MARKETS, CHANNELS)):
-            ws_handler.add(
-                WebsocketClient(
-                    api=cb_api,
-                    channel=channel,
-                    market=market,
-                    exchange=EXCHANGE,
-                    data_queue=data_queue,
-                    endpoint=ENDPOINT,
-                    save_feed=SAVE_FEED,
-                    output_folder=OUTPUT_DIRECTORY,
-                    module_timer=module_timer,
-                    stats_queue=perf_plot_queue,
-                    stats_queue_interval=PERF_PLOT_INTERVAL,
-                ),
-                start_immediately=True
-            )
+        ws_handler.add(
+            WebsocketClient(
+                api=cb_api,
+                channel=CHANNEL,
+                market=MARKET,
+                exchange=EXCHANGE,
+                data_queue=data_queue,
+                endpoint=ENDPOINT,
+                save_feed=SAVE_FEED,
+                output_folder=OUTPUT_DIRECTORY,
+                module_timer=module_timer,
+                stats_queue=perf_plot_queue,
+                stats_queue_interval=PERF_PLOT_INTERVAL,
+            ),
+            start_immediately=True
+        )
 
     # load orderbook snapshot into queue
     snapshot_order_count = 0
@@ -196,7 +203,7 @@ if __name__ == '__main__':
         snapshot_filepath = None
         if not LOAD_LOCAL_DATA:
             # noinspection PyRedeclaration
-            orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKETS[0], level=3)
+            orderbook_snapshot = cbp_api.get_product_order_book(product_id=MARKET, level=3)
         else:
             # noinspection PyRedeclaration
             snapshot_filepath = Path.cwd() / SNAPSHOT_FILEPATH
@@ -206,7 +213,7 @@ if __name__ == '__main__':
             depth=ORDERBOOK_SNAPSHOT_DEPTH,
             orderbook_snapshot=orderbook_snapshot,
             save=SAVE_ORDERBOOK_SNAPSHOT and not LOAD_LOCAL_DATA,
-            market=MARKETS[0],
+            market=MARKET,
             save_folder=OUTPUT_DIRECTORY,
             snapshot_filepath=snapshot_filepath,
             exchange=EXCHANGE,
@@ -227,17 +234,21 @@ if __name__ == '__main__':
             queue=data_queue,
             snapshot_order_count=snapshot_order_count,
             output_queue=depth_chart_queue,
-            save_csv=SAVE_CSV,
-            save_interval=SAVE_INTERVAL,
             item_display_flags=ITEM_DISPLAY_FLAGS,
             build_matches=BUILD_MATCHES,
             build_candles=BUILD_CANDLES,
+            save_matches=SAVE_MATCHES,
+            save_candles=SAVE_CANDLES,
+            save_interval=SAVE_INTERVAL,
+            keep_feed_in_memory=KEEP_FEED_IN_MEMORY,
             load_feed_filepath=load_feed_filepath,
-            store_feed_in_memory=STORE_FEED_IN_MEMORY,
             module_timer=module_timer,
             exchange=EXCHANGE,
+            market=MARKET,
             stats_queue=perf_plot_queue,
             stats_queue_interval=PERF_PLOT_INTERVAL,
+            build_orderbook=BUILD_ORDERBOOK,
+            output_folder=OUTPUT_DIRECTORY,
         )
 
         orderbook_builder.thread.start()

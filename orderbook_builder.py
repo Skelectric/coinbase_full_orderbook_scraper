@@ -117,36 +117,18 @@ class OrderbookSnapshotHandler:
 
 class OrderbookBuilder:
     """Build limit orderbook from msgs in queue"""
-    def __init__(
-            self,
-            queue: q.Queue = None,
-            snapshot_order_count: int = 0,
-            output_queue: mp.Queue = None,
-            save_csv: bool = False,
-            output_folder: str = 'data',
-            save_interval: int = None,
-            item_display_flags: dict = None,
-            build_matches: bool = False,
-            build_candles: bool = False,
-            load_feed_filepath: Path = None,
-            store_feed_in_memory: bool = False,
-            module_timer: Timer = None,
-            exchange: str = "Coinbase",
-            stats_queue: mp.Queue = None,
-            stats_queue_interval: float = None,
-    ):
+    def __init__(self, queue: q.Queue, **kwargs):
         # queue worker options
-        self.__market = None
-        self.__snapshot_order_count = snapshot_order_count
-        self.__save_CSV = save_csv
-        self.__output_folder = output_folder
-        self.__save_timer = Timer()
-        self._save_interval = save_interval
-        self.__store_feed_in_memory = store_feed_in_memory
+        self.__snapshot_order_count = kwargs.get("snapshot_order_count", 0)  # int
+        self.__save_matches = kwargs.get("save_matches", False)  # bool
+        self.__save_candles = kwargs.get("save_candles", False)  # bool
+        self.__output_folder = kwargs.get("output_folder", "data")  # str
+        self.__keep_feed_in_memory = kwargs.get("keep_feed_in_memory", True)
 
         # misc
-        self.module_timer = module_timer
-        self.exchange = exchange
+        self.module_timer = kwargs.get("module_timer", Timer())  # Timer
+        self.__exchange = kwargs.get("exchange", None)  # str
+        self.__market = kwargs.get("market", None)  # str
 
         self.__item_display_flags = {
             "subscriptions": False,
@@ -158,25 +140,42 @@ class OrderbookBuilder:
             "snapshot": False
         }
 
+        item_display_flags = kwargs.get("item_display_flags", None)  # dict
         if isinstance(item_display_flags, dict):
-            for item_type in item_display_flags:
-                self.__item_display_flags[item_type] = item_display_flags[item_type]
+            self.__item_display_flags.update(item_display_flags)
 
+        if self.module_timer.get_start_time() is None:
+            self.module_timer.start()
         module_timestamp = self.module_timer.get_start_time(_format="datetime").strftime("%Y%m%d-%H%M%S")
         # build match dataframe
-        self.__build_matches = build_matches
-        self.matches = MatchDataFrame(exchange="Coinbase", timestamp=module_timestamp)
+        self.__build_matches = kwargs.get("build_matches", True)  # bool
+        self.matches = MatchDataFrame(
+            exchange=self.__exchange,
+            market=self.__market,
+            timestamp=module_timestamp,
+            output_folder=self.__output_folder
+        )
 
-        self.__build_candles = build_candles
+        self.__build_candles = kwargs.get("build_candles", False)  # bool
         # build candles dataframe
         self.candles = None
-        if build_candles:
-            self.candles = CandleDataFrame(exchange="Coinbase", frequency="1T", timestamp=module_timestamp)
+        if self.__build_candles:
+            self.candles = CandleDataFrame(
+                exchange=self.__exchange,
+                market=self.__market,
+                frequency="1T",
+                timestamp=module_timestamp,
+                output_folder=self.__output_folder
+            )
+
+        self._save_interval = kwargs.get("save_interval", 360)  # float (seconds)
+        self.__save_timer = Timer()
 
         # data structures
-        self.lob = LimitOrderBook()
         self.queue = queue
-        self.__backfill_queue = q.Queue()
+        self.lob = None
+        if kwargs.get("build_orderbook", True):
+            self.lob = LimitOrderBook()
 
         # queue mode tracking and debugging
         self.__first_sequence = None
@@ -186,16 +185,16 @@ class OrderbookBuilder:
         self.__prev_sequence = None
         self.__sequence = None
         self.latest_timestamp = None
-        self.__backfill_item_count = 0
-        self.__backfill_items_processed = 0
 
-        self.output_queue = output_queue
+        self.output_queue = kwargs.get("output_queue", None)  # mp.queue
+        if self.output_queue is not None:
+            assert type(self.output_queue) == type(mp.Queue()), "passed output queue is not a multiprocessing queue!"
         if self.output_queue is not None:
             # q.Queue has maxsize, whereas mp.Queue has _maxsize
             assert hasattr(self.output_queue, '_maxsize')
 
         # queue stats
-        self.__timer = Timer()
+        self.__lob_builder_timer = Timer()
         self.__queue_empty_timer = Timer()
         self._queue_empty_interval = 60
         self.__queue_stats_timer = Timer()
@@ -219,16 +218,25 @@ class OrderbookBuilder:
         self.queue_mode = None
         self.__next_queue_mode()
 
-        # skip snapshot mode if 0 snapshot items loaded
-        if snapshot_order_count == 0:
+        # skip snapshot and backfill modes if 0 snapshot items loaded, or if not building orderbook
+        # else, initialize backfill queue
+        if self.__snapshot_order_count == 0 or self.lob is None:
             logger.debug("No snapshot items.")
             self.__skip_to_next_queue_mode("websocket")
+        elif self.lob is None:
+            logger.debug("Build orderbook set to false.")
+            self.__skip_to_next_queue_mode("websocket")
+        else:
+            self.__backfill_queue = q.Queue()
+            self.__backfill_item_count = 0
+            self.__backfill_items_processed = 0
 
         # main processing thread
         self.thread = Thread(target=self.__process_queue)
 
         # use for running local copies of feeds
         self.__load_feed = False
+        load_feed_filepath = kwargs.get("load_feed_filepath", None)  # Path
         if load_feed_filepath is not None:
             self.__load_feed = True
             msg = "Path passed to load_feed_filepath. "
@@ -241,8 +249,10 @@ class OrderbookBuilder:
         self.total_count = 0
         self.count = 0
         self.delays = deque()
-        self.stats_queue = stats_queue
-        self.stats_queue_interval = stats_queue_interval
+        self.stats_queue = kwargs.get("stats_queue", None)
+        if self.stats_queue is not None:
+            assert type(self.stats_queue) == type(mp.Queue()), "passed stats queue is not a multiprocessing queue!"
+        self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
 
     def __load_queue_with_next(self):
         assert self.__load_feed is True
@@ -348,7 +358,7 @@ class OrderbookBuilder:
             raise q.Empty
 
     def __process_queue(self) -> None:
-        self.__timer.start()
+        self.__lob_builder_timer.start()
         self.__lob_check_timer.start()
         self.__save_timer.start()
         self.__queue_stats_timer.start()
@@ -513,13 +523,6 @@ class OrderbookBuilder:
 
             # process new orders
             case "open" | "snapshot" if valid_open and valid_sequence:
-                order = Order(
-                    uid=order_id,
-                    is_bid=is_bid,
-                    size=float(remaining_size),
-                    price=float(price),
-                    timestamp=timestamp
-                )
 
                 if self.__item_display_flags[item_type]:
                     s_print("------------------------------------------------------------------------")
@@ -527,20 +530,23 @@ class OrderbookBuilder:
                     s_print(f"Order -- {side} {remaining_size} units @ {price}", end=' ')
                     s_print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
 
-                self.lob.process(order, action="add")
+                if self.lob is not None:
 
-                if output_data:
-                    self.output_data()
+                    order = Order(
+                        uid=order_id,
+                        is_bid=is_bid,
+                        size=float(remaining_size),
+                        price=float(price),
+                        timestamp=timestamp
+                    )
+
+                    self.lob.process(order, action="add")
+
+                    if output_data:
+                        self.output_data()
 
             # process order cancels
             case "done" if valid_done and valid_sequence:
-                order = Order(
-                    uid=order_id,
-                    is_bid=is_bid,
-                    size=None,
-                    price=None,
-                    timestamp=timestamp,
-                )
 
                 if self.__item_display_flags[item_type]:
                     s_print("------------------------------------------------------------------------")
@@ -548,20 +554,23 @@ class OrderbookBuilder:
                     s_print(f"Order -- {side} {remaining_size} units @ {price}", end=' ')
                     s_print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
 
-                self.lob.process(order, action="remove")
+                if self.lob is not None:
 
-                if output_data:
-                    self.output_data()
+                    order = Order(
+                        uid=order_id,
+                        is_bid=is_bid,
+                        size=None,
+                        price=None,
+                        timestamp=timestamp,
+                    )
+
+                    self.lob.process(order, action="remove")
+
+                    if output_data:
+                        self.output_data()
 
             # process order changes
             case "change" if valid_change and valid_sequence:
-                order = Order(
-                    uid=order_id,
-                    is_bid=is_bid,
-                    size=float(new_size),
-                    price=None,
-                    timestamp=timestamp,
-                )
 
                 if self.__item_display_flags[item_type]:
                     s_print("------------------------------------------------------------------------")
@@ -569,10 +578,20 @@ class OrderbookBuilder:
                     s_print(f"Order -- {side} {new_size} units @ {price}", end=' ')
                     s_print(f"-- order_id = {order_id} -- timestamp: {timestamp}")
 
-                self.lob.process(order, action="change")
+                if self.lob is not None:
 
-                if output_data:
-                    self.output_data()
+                    order = Order(
+                        uid=order_id,
+                        is_bid=is_bid,
+                        size=float(new_size),
+                        price=None,
+                        timestamp=timestamp,
+                    )
+
+                    self.lob.process(order, action="change")
+
+                    if output_data:
+                        self.output_data()
 
             # process trades
             case "match" if valid_sequence:
@@ -667,15 +686,17 @@ class OrderbookBuilder:
     def display_subscription(self, item: dict):
         assert len(item.get("channels")) == 1
         assert len(item["channels"][0]["product_ids"]) == 1
-        self.__market = item['channels'][0]['product_ids'][0]
-        line_output = f"Subscribed to {self.exchange}'s '{self.__market}' channel "
+        market = item['channels'][0]['product_ids'][0]
+        assert market == self.__market
+        line_output = f"Subscribed to {self.__exchange}'s '{market}' channel "
         line_output += f"for {item['channels'][0]['product_ids'][0]}"
         s_print(colored(line_output, "yellow"))
 
     def __log_summary(self):
         logger.info("________________________________ Summary ________________________________")
         # Todo: move log_details into here
-        self.lob.log_details()
+        if self.lob is not None:
+            self.lob.log_details()
         logger.info(f"Matches processed = {self.matches.total_items:,}")
         if self.candles is not None:
             logger.info(f"Candles generated = {self.candles.total_items}")
@@ -761,18 +782,18 @@ class OrderbookBuilder:
             logger.warning(f"{item}")
 
     def __save_dataframes(self, final: bool = False) -> None:
-        if not self.__save_CSV:
+        if not (self.__save_matches or self.__save_candles):
             return
         logger.info(f"Saving dataframes. Time elapsed: {self.module_timer.elapsed(_format='hms')}")
 
-        if isinstance(self.matches, MatchDataFrame) and not self.matches.is_empty:
-            self.matches.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
-            if not self.__store_feed_in_memory:
+        if self.__save_matches and isinstance(self.matches, MatchDataFrame) and not self.matches.is_empty:
+            self.matches.save_chunk(csv=self.__save_matches, update_filename_flag=final)
+            if not self.__keep_feed_in_memory:
                 self.matches.clear()
 
-        if isinstance(self.candles, CandleDataFrame) and not self.candles.is_empty:
-            self.candles.save_chunk(csv=self.__save_CSV, update_filename_flag=final)
-            if not self.__store_feed_in_memory:
+        if self.__save_candles and isinstance(self.candles, CandleDataFrame) and not self.candles.is_empty:
+            self.candles.save_chunk(csv=self.__save_matches, update_filename_flag=final)
+            if not self.__keep_feed_in_memory:
                 self.candles.clear()
 
     @run_once_per_interval("_save_interval")
@@ -787,7 +808,7 @@ class OrderbookBuilder:
 
     @run_once_per_interval("_lob_check_interval")
     def __timed_lob_check(self) -> None:
-        if not self.__lob_checked:
+        if not self.__lob_checked and self.lob is not None:
             logger.info(f"Checking orderbook validity...", end='')
             self.lob.check()
             self.__lob_checked = True
@@ -805,10 +826,10 @@ class OrderbookBuilder:
         msg = ''
 
         if track_average:
-            self.__queue_stats["time"].append(self.__timer.elapsed())
+            self.__queue_stats["time"].append(self.__lob_builder_timer.elapsed())
             self.__queue_stats["queue_sizes"].append(self.queue.qsize())
             avg_qsize = sum(self.__queue_stats["queue_sizes"]) / len(self.__queue_stats["queue_sizes"])
-            logger.info(f"Average queue size over {self.__timer.elapsed(hms_format=True)}: {avg_qsize:.2f}")
+            logger.info(f"Average queue size over {self.__lob_builder_timer.elapsed(hms_format=True)}: {avg_qsize:.2f}")
             self.__queue_stats["avg_qsize"].append(avg_qsize)
             # keep track of the last 1000 queue sizes (so 10k seconds)
             self.__queue_stats["queue_sizes"] = self.__queue_stats["queue_sizes"][-1000:]

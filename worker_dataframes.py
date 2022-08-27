@@ -15,18 +15,18 @@ pd.set_option('display.width', 1000)
 
 
 class WorkerDataFrame:
-    def __init__(self, df_type: str):
+    def __init__(self, df_type: str, *args, **kwargs):
         self.df = pd.DataFrame()
         self.df_type = df_type
         self.filename_args = None
         self.filename = None
         self.total_items = 0
-        self.path = Path("/data")
+        self.output_folder = kwargs.get("output_folder", "data")
 
-    def clear(self) -> None:  # return clear dataframe
+    def clear(self) -> None:  # clear dataframe in-place
         self.df = self.df.iloc[0:0]
 
-    def append_tuple(self, data: tuple) -> None:  # append list
+    def append_tuple(self, data: tuple) -> None:  # append tuple
         _, col = self.df.shape
         if col == len(data):
             self.df.loc[len(self.df)] = data
@@ -38,17 +38,17 @@ class WorkerDataFrame:
         self.df = pd.concat([self.df, data])
         self.total_items += 1
 
-    def save_chunk(self, csv: bool = True, hdf: bool = False, update_filename_flag: bool = False) -> None:
+    def save_chunk(self, csv: bool = True, update_filename_flag: bool = False) -> None:
         """Save dataframe chunk using append."""
 
-        if not (csv or hdf):
+        if not csv:
             return
 
         if self.total_items == 0:  # filename can't be derived if dataframe is empty
             logger.debug(f"{self.df_type} dataframe is empty. Skipping save...")
             return
 
-        file_exists = Path(f"data/{self.filename}").is_file()
+        file_exists = Path(f"{self.output_folder}/{self.filename}").is_file()
 
         if self.filename is not None:
             # logger.debug(f"data/{self.filename} exists: {file_exists}")
@@ -69,33 +69,21 @@ class WorkerDataFrame:
 
         if csv:
 
-            if Path(f"data/{self.filename}").suffix != '.csv':  # append extension if doesn't exist
+            if Path(f"{self.output_folder}/{self.filename}").suffix != '.csv':  # append extension if doesn't exist
                 self.filename += ".csv"
 
             if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
                 # logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
                 self.update_filename(extension='.csv')
 
-            self.df.to_csv(rf"data/{self.filename}", index=False, mode='a', header=header)
-            logger.info(f"Saved {self.df_type} dataframe into {self.filename}.")
-
-        if hdf:
-
-            if Path(f"data/{self.filename}").suffix != '.hdf':  # append extension if doesn't exist
-                self.filename += ".hdf"
-
-            if update_filename_flag and file_exists:  # rename when update_filename_flag=True (should only trigger at end)
-                # logger.debug(f"update_filename_flag flag set to {update_filename_flag}. Running file rename steps...")
-                self.update_filename(extension='.hdf')
-
-            self.df.to_hdf(rf"data/{self.filename}", key='df', mode='a')
+            self.df.to_csv(rf"{self.output_folder}/{self.filename}", index=False, mode='a', header=header)
             logger.info(f"Saved {self.df_type} dataframe into {self.filename}.")
 
     def update_filename(self, extension: str) -> None:
         prev_filename = self.filename
         self.derive_df_filename()
         self.filename += extension
-        os.rename(f"data/{prev_filename}", f"data/{self.filename}")
+        os.rename(f"{self.output_folder}/{prev_filename}", f"{self.output_folder}/{self.filename}")
         logger.info(f"Renamed file from {prev_filename} to {self.filename}...")
         # assert Path(f"data/{self.filename}").is_file()
 
@@ -157,16 +145,16 @@ class WorkerDataFrame:
 
 
 class MatchDataFrame(WorkerDataFrame):
-    def __init__(self, exchange=None, timestamp=None):
-        super(MatchDataFrame, self).__init__(df_type="matches")
-        self.exchange = exchange
-        self.short_str = None
+    def __init__(self, *args, **kwargs):
+        super(MatchDataFrame, self).__init__(df_type="matches", *args, **kwargs)
+        self.exchange = kwargs.get("exchange", None)
+        self.market = kwargs.get("market", None)
+        self.timestamp = kwargs.get("timestamp", datetime.now().strftime("%Y%m%d-%H%M%S"))
         self.columns = (
             "type", "time", "product_id", "side", "size", "price", "trade_id", "maker_order_id", "taker_order_id"
         )
         self.df = pd.DataFrame(columns=self.columns)
         self.filename = None
-        self.timestamp = timestamp if timestamp is not None else datetime.now().strftime("%Y%m%d-%H%M%S")
 
     def process_item(self, item, display_match=True, store_in_df=False) -> None:
         if display_match:
@@ -184,8 +172,6 @@ class MatchDataFrame(WorkerDataFrame):
 
     def derive_df_filename(self) -> None:
         try:
-            if self.short_str is None:
-                self.short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
             self.filename_args = {
                 "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
                 "exchange": self.exchange,
@@ -199,6 +185,14 @@ class MatchDataFrame(WorkerDataFrame):
             raise e
         else:
             super().derive_df_filename()
+
+    @property
+    def short_str(self):
+        if self.market is None:
+            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
+        else:
+            short_str = self.market[:self.market.find("-")]
+        return short_str
 
     @staticmethod
     def display_match(item) -> None:
@@ -228,16 +222,16 @@ class MatchDataFrame(WorkerDataFrame):
 
 
 class CandleDataFrame(WorkerDataFrame):
-    def __init__(self, exchange=None, frequency=None, timestamp=None):
-        super(CandleDataFrame, self).__init__(df_type="candles")
-        self.exchange = exchange
-        self.short_str = None
+    def __init__(self, *args, **kwargs):
+        super(CandleDataFrame, self).__init__(df_type="candles", *args, **kwargs)
+        self.exchange = kwargs.get("exchange", None)
+        self.market = kwargs.get("market", None)
+        self.frequency = kwargs.get("frequency", None)
+        self.timestamp = kwargs.get("timestamp", datetime.now().strftime("%Y%m%d-%H%M%S"))
         self.columns = (
             "type", "candle", "product_id", "frequency", "open", "high", "low", "close", "volume"
         )
         self.df = pd.DataFrame(columns=self.columns)
-        self.freq = frequency
-        self.timestamp = timestamp if timestamp is not None else datetime.now().strftime("%Y%m%d-%H%M%S")
         # temp variables to help with building current candle
         self.last_candle = None
         self.last_open = None
@@ -253,7 +247,7 @@ class CandleDataFrame(WorkerDataFrame):
 
     def process_item(self, item) -> None:
         item = self.convert_to_df(item)  # convert from dict into df to leverage pandas dt.floor method
-        __candle = item["time"].dt.floor(freq=self.freq)[0]  # floor time at chosen frequency
+        __candle = item["time"].dt.floor(freq=self.frequency)[0]  # floor time at chosen frequency
         __product_id = item["product_id"][0]
         __size = float(item["size"][0])
         __price = float(item["price"][0])
@@ -267,7 +261,7 @@ class CandleDataFrame(WorkerDataFrame):
         elif __candle != self.last_candle:
             # if new candle, append candle vars to df and reset vars for new candle
             __tuple = (
-                "candles", self.last_candle, __product_id, self.freq, self.last_open,
+                "candles", self.last_candle, __product_id, self.frequency, self.last_open,
                 self.last_high, self.last_low, self.last_close, round(self.last_volume, 6)
             )
             # logger.debug(f"appending tuple to candles df: {__tuple}")
@@ -287,14 +281,12 @@ class CandleDataFrame(WorkerDataFrame):
 
     def derive_df_filename(self) -> None:
         try:
-            if self.short_str is None:
-                self.short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
             self.filename_args = {
                 "template": "{exchange}_{filename_body}_{all_symbols}_USD_{timestamp}",
                 "exchange": self.exchange,
                 "filename_body": "{count}_{freq}_OHLC_candles",
                 "count": self.rows,
-                "freq": self.freq,
+                "freq": self.frequency,
                 "all_symbols": self.short_str,
                 "timestamp": self.timestamp
             }
@@ -303,3 +295,11 @@ class CandleDataFrame(WorkerDataFrame):
             raise e
         else:
             super().derive_df_filename()
+
+    @property
+    def short_str(self):
+        if self.market is None:
+            short_str = ','.join([x[:x.find("-")] for x in list(self.df.loc[:, "product_id"].unique())])
+        else:
+            short_str = self.market[:self.market.find("-")]
+        return short_str

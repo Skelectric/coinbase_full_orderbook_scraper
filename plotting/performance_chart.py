@@ -2,11 +2,12 @@ from multiprocessing import Queue
 from queue import Empty
 from itertools import cycle
 from random import randint
-from datetime import datetime
+from datetime import datetime, timedelta
 import pprint
 from threading import Lock
 
 from loguru import logger
+import sys
 
 from tools.timer import Timer
 import signal
@@ -19,10 +20,26 @@ from collections import deque, defaultdict
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+def configure_logger():
+    logger.remove()  # remove default logger
+    # # add file logger with full debug
+    # logger.add(
+    #     "logs\\performance_plotter_log_{time}.log", level="DEBUG", rotation="10 MB"
+    # )
+
+    # add console logger with formatting
+    logger_format = "<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> "
+    logger_format += "--- <level>{level}</level> | Thread {thread} <level>{message}</level>"
+    logger.add(
+        sys.stdout, level="DEBUG",
+        format=logger_format,
+    )
+
 
 def initialize_plotter(queue: Queue, *args, **kwargs):
     """Function to initialize and start performance plotter, required for multiprocessing."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    configure_logger()
     window = kwargs.get("window")
     performance_plotter = PerformancePlotter(queue=queue, window=window)
     logger.debug(f"Performance plotter starting.")
@@ -32,6 +49,18 @@ def initialize_plotter(queue: Queue, *args, **kwargs):
 
     if not performance_plotter.closed:
         performance_plotter.close()
+
+
+class TimeAxisItem(pg.AxisItem):
+    def __init__(self, *args, **kwargs):
+        super(TimeAxisItem, self).__init__(*args, **kwargs)
+        # # Paint tick every 5 seconds
+        # self.setTickSpacing(5, 0, 0)
+        # # Set fixed tick height
+        # self.fixedHeight = 150
+
+    def tickStrings(self, values, scale, spacing):
+        return [str(timedelta(seconds=value)) for value in values]
 
 
 class PerformancePlotter:
@@ -60,28 +89,28 @@ class PerformancePlotter:
 
         # total count plot
         self.p1 = self.pw.addPlot(axisItems={"bottom": pg.DateAxisItem(orientation='bottom')})
-        self.p1.setLabel('bottom', 'datetime.utcnow', units='seconds')
+        self.p1.setLabel('bottom', 'datetime.utcnow')
         self.p1.setLabel('left', 'total items processed')
         self.p1.setDownsampling(mode='subsample')
         self.p1.addLegend()
 
         # marginal count plot
-        self.p2 = self.pw.addPlot(axisItems={"bottom": pg.AxisItem(orientation='bottom')})
-        self.p2.setLabel('bottom', 'elapsed time', units='seconds')
+        self.p2 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
+        self.p2.setLabel('bottom', 'elapsed time')
         self.p2.setLabel('left', 'item processing rate')
         self.p2.setDownsampling(mode='subsample')
 
         self.pw.nextRow()
 
         # delay plot
-        self.p3 = self.pw.addPlot(axisItems={"bottom": pg.AxisItem(orientation='bottom')})
-        self.p3.setLabel('bottom', 'elapsed time', units='seconds')
+        self.p3 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
+        self.p3.setLabel('bottom', 'elapsed time')
         self.p3.setLabel('left', 'avg latency', units='seconds')
         self.p3.setDownsampling(mode='subsample')
 
         # performance plotter queue size
-        self.p4 = self.pw.addPlot(axisItems={"bottom": pg.AxisItem(orientation='bottom')})
-        self.p4.setLabel('bottom', 'elapsed time', units='seconds')
+        self.p4 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
+        self.p4.setLabel('bottom', 'elapsed time')
         self.p4.setLabel('left', 'queue size', units='items')
         self.p4.setDownsampling(mode='subsample')
         self.p4.addLegend()
@@ -181,7 +210,7 @@ class PerformancePlotter:
     def update_p3(self):
         self.p3.clear()
         for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "timestamp", "avg_delay")
+            item = self.make_curve_item(process, "elapsed", "avg_delay")
             self.p3.addItem(item)
 
     def update_p4(self):
