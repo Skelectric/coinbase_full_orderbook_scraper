@@ -1,5 +1,5 @@
-from tools.timer import Timer
-from loguru import logger
+from lvl3_scraper_coinbase.tools.timer import Timer
+
 
 def run_once(func):
     """Decorator that lets a function only run once a loop."""

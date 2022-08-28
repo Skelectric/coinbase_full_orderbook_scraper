@@ -1,5 +1,4 @@
-"""Build orderbook using webhook to Coinbase's FULL channel."""
-# Todo: Build multi-market support
+"""Build AVL-tree orderbook using webhook to Coinbase's FULL channel."""
 
 from loguru import logger
 import os
@@ -7,7 +6,6 @@ import os
 from datetime import datetime
 import queue
 import sys
-import itertools
 from pathlib import Path
 import time
 import easygui
@@ -20,6 +18,7 @@ from websockets_coinbase import WebsocketClient, WebsocketClientHandler
 from orderbook_builder import OrderbookBuilder, OrderbookSnapshotHandler
 from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
+from tools.configure_loguru import configure_logger
 import plotting.depth_chart_mpl as dpth
 import plotting.performance_chart as perf
 
@@ -27,6 +26,8 @@ os.system('color')
 
 # ======================================================================================
 # Script Parameters
+
+AUTO_RESTART = False
 
 WEBHOOK_ONLY = False
 
@@ -49,12 +50,12 @@ ITEM_DISPLAY_FLAGS = {
     "change": False
 }
 # Coinbase snapshot tends to provide a sequence earlier than where websocket starts
-SNAPSHOT_GET_DELAY = 0.75  # in seconds.
+SNAPSHOT_GET_DELAY = 1  # in seconds.
 
 ORDERBOOK_SNAPSHOT_DEPTH = 1000
-BUILD_ORDERBOOK = False
-BUILD_MATCHES = False
-BUILD_CANDLES = False
+BUILD_ORDERBOOK = True
+BUILD_MATCHES = True
+BUILD_CANDLES = True
 PLOT_DEPTH_CHART = True
 
 CANDLE_FREQUENCY = '1T'  # 1 min
@@ -62,13 +63,14 @@ CANDLE_FREQUENCY = '1T'  # 1 min
 SAVE_MATCHES = False
 SAVE_CANDLES = False
 SAVE_INTERVAL = 360
-KEEP_FEED_IN_MEMORY = False
+KEEP_MATCHES_IN_MEMORY = False
+KEEP_CANDLES_IN_MEMORY = False
 
 PLOT_PERFORMANCE = True
 PERF_PLOT_INTERVAL = 0.05  # output to performance plotter queue every interval seconds
-PERF_PLOT_WINDOW = 20  # in seconds (approximate)
+PERF_PLOT_WINDOW = 900  # in seconds (approximate)
 
-SUBFOLDER = '08-26-2022_Coinbase_ETH-USD'  # override output subfolder (default = None)
+SUBFOLDER = None  # override output subfolder (default = None)
 
 # ======================================================================================
 # Webhook Parameters
@@ -79,24 +81,6 @@ MARKET = 'ETH-USD'
 CHANNEL = 'full'
 # MARKETS = ('BTC-USD', 'ETH-USD', 'DOGE-USD', 'SHIB-USD', 'SOL-USD',
 #           'AVAX-USD', 'UNI-USD', 'SNX-USD', 'CRV-USD', 'AAVE-USD', 'YFI-USD')
-
-# ======================================================================================
-# Configure logger
-
-logger.remove()  # remove default logger
-
-# # add file logger with full debug
-# logger.add(
-#     "logs\\coinbase_full_scraper_log_{time}.log", level="DEBUG", rotation="10 MB"
-# )
-
-# add console logger with formatting
-logger_format = "<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> "
-logger_format += "--- <level>{level}</level> | Thread {thread} <level>{message}</level>"
-logger.add(
-    sys.stdout, level="DEBUG",
-    format=logger_format,
-)
 
 # ======================================================================================
 
@@ -115,12 +99,16 @@ if __name__ == '__main__':
     module_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     killer = GracefulKiller()
 
+    SUBFOLDER = f'{datetime.now().strftime("%m-%d-%Y")}_{EXCHANGE}_{MARKET}' if SUBFOLDER is None else SUBFOLDER
+    OUTPUT_DIRECTORY = Path.cwd() / 'data' / SUBFOLDER
+
+    log_filename = f"{EXCHANGE}_full_scraper_log_{module_timestamp}.log"
+    configure_logger(True, OUTPUT_DIRECTORY, log_filename)
+
     cb_api = CoinbaseAPI()  # used for authenticated websocket
     cbp_api = CoinbaseProAPI()  # used for rest API calls
 
     # ensure output folder exists
-    SUBFOLDER = f'{datetime.now().strftime("%m-%d-%Y")}_{EXCHANGE}_{MARKET}' if SUBFOLDER is None else SUBFOLDER
-    OUTPUT_DIRECTORY = Path.cwd() / 'data' / SUBFOLDER
     if SAVE_MATCHES or SAVE_FEED or SAVE_ORDERBOOK_SNAPSHOT:
         OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
@@ -158,7 +146,11 @@ if __name__ == '__main__':
         # noinspection PyRedeclaration
         perf_plot_queue = mp.Queue()
         args = (perf_plot_queue, )
-        kwargs = {"window": window, }
+        kwargs = {
+            "window": window,
+            "output_directory": OUTPUT_DIRECTORY,
+            "module_timer": module_timer,
+        }
         # noinspection PyRedeclaration
         perf_plot_process = mp.Process(
             target=perf.initialize_plotter,
@@ -240,7 +232,8 @@ if __name__ == '__main__':
             save_matches=SAVE_MATCHES,
             save_candles=SAVE_CANDLES,
             save_interval=SAVE_INTERVAL,
-            keep_feed_in_memory=KEEP_FEED_IN_MEMORY,
+            keep_matches_in_memory=KEEP_MATCHES_IN_MEMORY,
+            keep_candles_in_memory=KEEP_CANDLES_IN_MEMORY,
             load_feed_filepath=load_feed_filepath,
             module_timer=module_timer,
             exchange=EXCHANGE,
@@ -299,11 +292,13 @@ if __name__ == '__main__':
         # wait for depth chart process to stop
         if depth_chart_process is not None:
             logger.debug(f"Joining depth chart plot process...")
-            depth_chart_process.join()
-            logger.debug("Depth chart process joined.")
-            # if depth_chart_process.is_alive():
-            #     depth_chart_process.terminate()
-            #     logger.debug("Depth chart process terminated.")
+            depth_chart_process.join(5)
+
+            if depth_chart_process.is_alive():
+                depth_chart_process.terminate()
+                logger.debug("Join timed out. Depth chart process terminated.")
+            else:
+                logger.debug("Depth chart process joined.")
 
         logger.info(f"Remaining data queue size: {data_queue.qsize()}")
         if data_queue.qsize() != 0:
@@ -314,11 +309,13 @@ if __name__ == '__main__':
     # wait for stats chart process to stop
     if perf_plot_process is not None:
         logger.debug(f"Joining performance plot process...")
-        perf_plot_process.join()
-        logger.debug("Performance plot process joined.")
-        # if perf_plot_process.is_alive():
-        #     perf_plot_process.terminate()
-        #     logger.debug("Performance plot process terminated.")
+        perf_plot_process.join(5)
+        if perf_plot_process.is_alive():
+            perf_plot_process.terminate()
+            logger.debug("Join timed out. Performance plot process terminated.")
+        else:
+            logger.debug("Performance plot process joined.")
+
 
     # if performance plot or depth chart closed before main process,
     # script will hang at end because of QueueFeederThreads, so need to clear queues again.
@@ -336,3 +333,6 @@ if __name__ == '__main__':
     # logger.debug(f"depth_chart_queue.qsize() = {depth_chart_queue.qsize()}")
 
     logger.info(f"Elapsed time = {module_timer.elapsed(_format='hms')}")
+
+    if AUTO_RESTART:
+        os.execv(sys.executable, ['python'] + sys.argv)

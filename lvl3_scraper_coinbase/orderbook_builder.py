@@ -123,7 +123,8 @@ class OrderbookBuilder:
         self.__save_matches = kwargs.get("save_matches", False)  # bool
         self.__save_candles = kwargs.get("save_candles", False)  # bool
         self.__output_folder = kwargs.get("output_folder", "data")  # str
-        self.__keep_feed_in_memory = kwargs.get("keep_feed_in_memory", True)
+        self.__keep_matches_in_memory = kwargs.get("keep_matches_in_memory", True)
+        self.__keep_candles_in_memory = kwargs.get("keep_candles_in_memory", True)
 
         # misc
         self.module_timer = kwargs.get("module_timer", Timer())  # Timer
@@ -788,12 +789,12 @@ class OrderbookBuilder:
 
         if self.__save_matches and isinstance(self.matches, MatchDataFrame) and not self.matches.is_empty:
             self.matches.save_chunk(csv=self.__save_matches, update_filename_flag=final)
-            if not self.__keep_feed_in_memory:
+            if not self.__keep_matches_in_memory:
                 self.matches.clear()
 
         if self.__save_candles and isinstance(self.candles, CandleDataFrame) and not self.candles.is_empty:
             self.candles.save_chunk(csv=self.__save_matches, update_filename_flag=final)
-            if not self.__keep_feed_in_memory:
+            if not self.__keep_candles_in_memory:
                 self.candles.clear()
 
     @run_once_per_interval("_save_interval")

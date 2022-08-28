@@ -5,11 +5,11 @@ from random import randint
 from datetime import datetime, timedelta
 import pprint
 from threading import Lock
-
 from loguru import logger
-import sys
 
-from tools.timer import Timer
+from lvl3_scraper_coinbase.tools.timer import Timer
+from lvl3_scraper_coinbase.tools.configure_loguru import configure_logger
+
 import signal
 
 import numpy as np
@@ -18,29 +18,25 @@ from scipy.ndimage import uniform_filter1d
 from collections import deque, defaultdict
 
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
-
-def configure_logger():
-    logger.remove()  # remove default logger
-    # # add file logger with full debug
-    # logger.add(
-    #     "logs\\performance_plotter_log_{time}.log", level="DEBUG", rotation="10 MB"
-    # )
-
-    # add console logger with formatting
-    logger_format = "<white>{time:YYYY-MM-DD HH:mm:ss.SSSSSS}</white> "
-    logger_format += "--- <level>{level}</level> | Thread {thread} <level>{message}</level>"
-    logger.add(
-        sys.stdout, level="DEBUG",
-        format=logger_format,
-    )
+from pyqtgraph.Qt import QtCore
 
 
 def initialize_plotter(queue: Queue, *args, **kwargs):
     """Function to initialize and start performance plotter, required for multiprocessing."""
+    # configure logging
+    output_directory = kwargs.get("output_directory", None)
+    module_timer = kwargs.get("module_timer", Timer())
+    if module_timer.get_start_time() is None:
+        module_timer.start()
+    module_timestamp = module_timer.get_start_time(_format="datetime_utc").strftime("%Y%m%d-%H%M%S")
+    log_filename = f"performance_plotter_log_{module_timestamp}.log"
+    configure_logger(True, output_directory, log_filename)
+
+    # ignore keyboard interrupts
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    configure_logger()
+
     window = kwargs.get("window")
+
     performance_plotter = PerformancePlotter(queue=queue, window=window)
     logger.debug(f"Performance plotter starting.")
     performance_plotter.start()
@@ -54,10 +50,6 @@ def initialize_plotter(queue: Queue, *args, **kwargs):
 class TimeAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs):
         super(TimeAxisItem, self).__init__(*args, **kwargs)
-        # # Paint tick every 5 seconds
-        # self.setTickSpacing(5, 0, 0)
-        # # Set fixed tick height
-        # self.fixedHeight = 150
 
     def tickStrings(self, values, scale, spacing):
         return [str(timedelta(seconds=value)) for value in values]

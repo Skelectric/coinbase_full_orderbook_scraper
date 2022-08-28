@@ -1,7 +1,7 @@
 from multiprocessing import Queue
 import threading
 from loguru import logger
-from tools.timer import Timer
+from lvl3_scraper_coinbase.tools.timer import Timer
 
 import numpy as np
 

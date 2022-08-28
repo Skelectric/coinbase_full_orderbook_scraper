@@ -2,8 +2,7 @@ import multiprocessing as mp
 import queue as q
 import numpy as np
 from loguru import logger
-from tools.timer import Timer
-import threading
+from lvl3_scraper_coinbase.tools.timer import Timer
 import easygui
 import signal
 import ctypes
