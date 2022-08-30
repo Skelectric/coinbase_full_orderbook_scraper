@@ -19,6 +19,7 @@ from api_coinbase import CoinbaseAPI
 from tools.helper_tools import s_print
 from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval, run_once
+from plotting.performance import PerfPlotQueueItem
 
 
 class WebsocketClient:
@@ -50,11 +51,10 @@ class WebsocketClient:
 
         # performance monitoring
         self.latest_timestamp = None
-        self.total_count = 0
-        self.count = 0  # reset every timer_queue_interval
-        self.delays = deque()
         self.stats_queue = stats_queue
-        self.stats_queue_interval = stats_queue_interval
+        if self.stats_queue is not None:
+            self.websocket_perf = PerfPlotQueueItem("websocket_thread", module_timer=module_timer)
+            self.stats_queue_interval = stats_queue_interval
 
     def websocket_thread(self) -> None:
         self.ws = create_connection(self.ws_url)
@@ -85,8 +85,6 @@ class WebsocketClient:
         feed = None
         while not self.kill and threading.main_thread().is_alive():
 
-            self.__output_perf_data()
-
             try:
                 feed = self.ws.recv()
                 if feed:
@@ -104,6 +102,8 @@ class WebsocketClient:
                         f.write(json.dumps(msg)+'\n')
 
                     self.process_msg(msg)
+
+                    self.__output_perf_data()
 
                 else:
                     logger.warning("Webhook message is empty!")
@@ -125,55 +125,26 @@ class WebsocketClient:
 
         self.running = False
 
-    def __track_perf_data(self):
-        # if self.latest_timestamp is not None:
-        delay = max(datetime.utcnow().timestamp() - self.latest_timestamp.timestamp(), 0)
-        self.count += 1
-        self.total_count += 1
-        self.delays.append(delay)
-
     @run_once_per_interval("stats_queue_interval")
     def __output_perf_data(self):
-
         if self.stats_queue is not None:
-            item = {
-                "process": "websocket_thread",
-                "timestamp": datetime.utcnow().timestamp(),
-                "elapsed": self.module_timer.elapsed(),
-                "data": {
-                    "total": self.total_count,
-                    "count": self.count,
-                    "avg_delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
-                },
-            }
-            # logger.debug(item)
-            self.stats_queue.put(item)
-
-            self.count = 0
-            self.delays = deque()
+            self.websocket_perf.send_to_queue(self.stats_queue)
 
     @run_once
     def __end_perf_data(self):
         if self.stats_queue is not None:
-            item = {
-                "process": "websocket_thread",
-                "timestamp": datetime.utcnow().timestamp(),
-                "elapsed": self.module_timer.elapsed(),
-                "data": None,
-            }
-            self.stats_queue.put(item)
+            self.websocket_perf.signal_end_item()
+            self.websocket_perf.send_to_queue(self.stats_queue)
             logger.debug(f"Websocket sent 'None' to stats queue.")
 
     def process_msg(self, msg: dict):
         timestamp = msg.get("time")
         if timestamp is not None:
-            self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+            self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
         else:
-            self.latest_timestamp = datetime.utcnow()
-
-        self.__track_perf_data()
+            self.latest_timestamp = datetime.utcnow().timestamp()
         self.data_queue.put(msg)
-        return None
+        self.websocket_perf.track(timestamp=self.latest_timestamp)
 
     def start_thread(self) -> None:
         logger.info(f"Starting websocket thread for {self.id}....")
@@ -251,8 +222,8 @@ class WebsocketClientHandler:
                     i += 1
 
             if len(self.get_active) != 0:
-                logger.info(f"Checking again in 2 seconds.")
-                time.sleep(2)
+                logger.info(f"Checking again in 5 seconds.")
+                time.sleep(5)
 
     def websocket_thread_keepalive(self, interval=60) -> None:
         time.sleep(interval//10)
@@ -287,4 +258,4 @@ class WebsocketClientHandler:
 
     @property
     def get_active(self) -> list:
-        return [x.id for x in self.websocket_clients]
+        return [x.id for x in self.websocket_clients if x.thread.is_alive()]

@@ -20,7 +20,7 @@ from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
 from tools.configure_loguru import configure_logger
 import plotting.depth_chart_mpl as dpth
-import plotting.performance_chart as perf
+import plotting.performance as perf
 
 os.system('color')
 
@@ -28,6 +28,7 @@ os.system('color')
 # Script Parameters
 
 AUTO_RESTART = False
+LOG_TO_FILE = False
 
 WEBHOOK_ONLY = False
 
@@ -56,7 +57,7 @@ ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_ORDERBOOK = True
 BUILD_MATCHES = True
 BUILD_CANDLES = True
-PLOT_DEPTH_CHART = True
+PLOT_DEPTH_CHART = False
 
 CANDLE_FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
@@ -67,7 +68,7 @@ KEEP_MATCHES_IN_MEMORY = False
 KEEP_CANDLES_IN_MEMORY = False
 
 PLOT_PERFORMANCE = True
-PERF_PLOT_INTERVAL = 0.05  # output to performance plotter queue every interval seconds
+PERF_PLOT_INTERVAL = 0.1  # output to performance plotter queue every interval seconds
 PERF_PLOT_WINDOW = 900  # in seconds (approximate)
 
 SUBFOLDER = None  # override output subfolder (default = None)
@@ -103,13 +104,13 @@ if __name__ == '__main__':
     OUTPUT_DIRECTORY = Path.cwd() / 'data' / SUBFOLDER
 
     log_filename = f"{EXCHANGE}_full_scraper_log_{module_timestamp}.log"
-    configure_logger(True, OUTPUT_DIRECTORY, log_filename)
+    configure_logger(LOG_TO_FILE, OUTPUT_DIRECTORY, log_filename)
 
     cb_api = CoinbaseAPI()  # used for authenticated websocket
     cbp_api = CoinbaseProAPI()  # used for rest API calls
 
     # ensure output folder exists
-    if SAVE_MATCHES or SAVE_FEED or SAVE_ORDERBOOK_SNAPSHOT:
+    if SAVE_MATCHES or SAVE_FEED or SAVE_ORDERBOOK_SNAPSHOT or LOG_TO_FILE:
         OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
     # main queue between websocket client and orderbook builder
@@ -150,6 +151,8 @@ if __name__ == '__main__':
             "window": window,
             "output_directory": OUTPUT_DIRECTORY,
             "module_timer": module_timer,
+            "log_to_file": LOG_TO_FILE,
+            "perf_plot_interval": PERF_PLOT_INTERVAL,
         }
         # noinspection PyRedeclaration
         perf_plot_process = mp.Process(

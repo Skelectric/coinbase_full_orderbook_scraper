@@ -338,7 +338,7 @@ class QueueWorker:
         self.worker_dataframes.append(CandleDataFrame(exchange="Coinbase", frequency=FREQUENCY, timestamp=timestamp))
 
     def save_dataframes(self, final: bool = False) -> None:
-        os.makedirs('data', exist_ok=True)  # ensure 'data' output folder exists
+        os.makedirs('../data', exist_ok=True)  # ensure 'data' output folder exists
         for wdf in self.worker_dataframes:
             if not wdf.is_empty:
                 if not final:

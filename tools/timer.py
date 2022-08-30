@@ -88,7 +88,7 @@ class Timer:
         return elapsed_time
 
     @time_formatter
-    def delta(self, *args, **kwargs):
+    def delta(self, *args, **kwargs) -> float:
         """Return time elapsed from last time this method was called.
         If first time calling this method, returns elapsed."""
         self.__check_started()

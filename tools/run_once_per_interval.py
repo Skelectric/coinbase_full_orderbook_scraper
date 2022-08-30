@@ -1,4 +1,4 @@
-from lvl3_scraper_coinbase.tools.timer import Timer
+from tools.timer import Timer
 
 
 def run_once(func):

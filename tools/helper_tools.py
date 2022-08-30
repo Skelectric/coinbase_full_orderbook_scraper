@@ -5,7 +5,7 @@ from loguru import logger
 from urllib import parse
 from threading import Lock
 
-from lvl3_scraper_coinbase.tools.run_once_per_interval import run_once_per_interval
+from tools.run_once_per_interval import run_once_per_interval
 
 
 def save_json(filename, d):

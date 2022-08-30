@@ -6,9 +6,11 @@ from datetime import datetime, timedelta
 import pprint
 from threading import Lock
 from loguru import logger
+import copy
 
-from lvl3_scraper_coinbase.tools.timer import Timer
-from lvl3_scraper_coinbase.tools.configure_loguru import configure_logger
+from tools.timer import Timer
+from tools.configure_loguru import configure_logger
+from tools.run_once_per_interval import run_once_per_interval
 
 import signal
 
@@ -23,6 +25,7 @@ from pyqtgraph.Qt import QtCore
 
 def initialize_plotter(queue: Queue, *args, **kwargs):
     """Function to initialize and start performance plotter, required for multiprocessing."""
+
     # configure logging
     output_directory = kwargs.get("output_directory", None)
     module_timer = kwargs.get("module_timer", Timer())
@@ -30,14 +33,16 @@ def initialize_plotter(queue: Queue, *args, **kwargs):
         module_timer.start()
     module_timestamp = module_timer.get_start_time(_format="datetime_utc").strftime("%Y%m%d-%H%M%S")
     log_filename = f"performance_plotter_log_{module_timestamp}.log"
-    configure_logger(True, output_directory, log_filename)
+    log_to_file = kwargs.get("log_to_file", False)
+    configure_logger(log_to_file, output_directory, log_filename)
 
     # ignore keyboard interrupts
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     window = kwargs.get("window")
+    perf_plot_interval = kwargs.get("perf_plot_interval", 0.1)  # how often other processes will send data
 
-    performance_plotter = PerformancePlotter(queue=queue, window=window)
+    performance_plotter = PerformancePlotter(queue=queue, window=window, perf_plot_interval=perf_plot_interval)
     logger.debug(f"Performance plotter starting.")
     performance_plotter.start()
 
@@ -69,11 +74,11 @@ class PerformancePlotter:
                 },
             }
     """
-    def __init__(self, queue: Queue, window: int = 1000, module_timer=None):
+    def __init__(self, queue: Queue, window: int = 1000, *args, **kwargs):
         self.queue = queue
         self.app = pg.mkQApp("Worker Stats")
         self.pw = pg.GraphicsLayoutWidget(show=True)
-        self.pw.resize(600, 600)
+        self.pw.resize(900, 600)
         self.pw.setWindowTitle('pyqtgraph: worker stats')
 
         # date_x_axis = pg.DateAxisItem(orientation='bottom')
@@ -94,18 +99,25 @@ class PerformancePlotter:
 
         self.pw.nextRow()
 
-        # delay plot
+        # latency plot
         self.p3 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
         self.p3.setLabel('bottom', 'elapsed time')
         self.p3.setLabel('left', 'avg latency', units='seconds')
         self.p3.setDownsampling(mode='subsample')
 
-        # performance plotter queue size
+        # time delta plot
         self.p4 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
         self.p4.setLabel('bottom', 'elapsed time')
-        self.p4.setLabel('left', 'queue size', units='items')
+        self.p4.setLabel('left', 'timedelta', units='seconds')
         self.p4.setDownsampling(mode='subsample')
         self.p4.addLegend()
+
+        # queue size plot
+        self.p5 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
+        self.p5.setLabel('bottom', 'elapsed time')
+        self.p5.setLabel('left', 'queue size', units='items')
+        self.p5.setDownsampling(mode='subsample')
+        self.p5.addLegend()
 
         # self.pw.show()
 
@@ -120,33 +132,21 @@ class PerformancePlotter:
         self.fps = None
         self.qtimer = QtCore.QTimer()
 
-        # self.data = defaultdict(
-        #     lambda: {
-        #         "timestamp": deque(maxlen=window),
-        #         "elapsed": deque(maxlen=window),
-        #         "data": defaultdict(
-        #             lambda: deque(maxlen=window)
-        #         ),
-        #         "pen": None
-        #     }
-        # )
-
         self.data = defaultdict(
             lambda: {
-                "timestamp": np.negative(np.ones(window)),
-                "elapsed": np.negative(np.ones(window)),
+                "timestamp": np.full(window, np.nan),
+                "elapsed": np.full(window, np.nan),
                 "data": defaultdict(
-                    lambda: np.negative(np.ones(window))
+                    lambda: np.full(window, np.nan),
                 ),
                 "pen": None
             }
         )
 
-        self.counter = 0
-
         # performance stats for self
         self.timer = Timer()
         self.timer.start()
+        self.perf_plot_interval = kwargs.get("perf_plot_interval", 0.1)  # can update self stats this much
 
         self.closed = False
 
@@ -171,6 +171,7 @@ class PerformancePlotter:
                 self.update_p2()
                 self.update_p3()
                 self.update_p4()
+                self.update_p5()
             # haven't figured out a way to stop event loop without raising ValueError
             except ValueError:
                 logger.debug(f"Performance plotter exited loop via Exception")
@@ -191,39 +192,51 @@ class PerformancePlotter:
         self.p1.clear()
         for process in (key for key in self.data.keys() if key != "performance_plotter"):
             item = self.make_curve_item(process, "timestamp", "total")
-            self.p1.addItem(item)
+            if item is not None:
+                self.p1.addItem(item)
 
     def update_p2(self):
         self.p2.clear()
         for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "elapsed", "count", (True, 20))
-            self.p2.addItem(item)
+            item = self.make_curve_item(process, "elapsed", "marginal", (True, 20))
+            if item is not None:
+                self.p2.addItem(item)
 
     def update_p3(self):
         self.p3.clear()
         for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "elapsed", "avg_delay")
-            self.p3.addItem(item)
+            item = self.make_curve_item(process, "elapsed", "avg_latency")
+            if item is not None:
+                self.p3.addItem(item)
 
     def update_p4(self):
         self.p4.clear()
+        for process in (key for key in self.data.keys()):
+            item = self.make_curve_item(process, "elapsed", "delta", (True, 10))
+            if item is not None:
+                self.p4.addItem(item)
+
+    @run_once_per_interval("perf_plot_interval")
+    def update_p5(self):
+        self.p5.clear()
         process = "performance_plotter"
         item = self.make_curve_item(process, "elapsed", "queue_size", (True, 10))
-        self.p4.addItem(item)
+        if item is not None:
+            self.p5.addItem(item)
 
     def make_curve_item(
             self, process: str, x_var: str, y_var: str,
             moving_avg: (bool, int) = (False, 10), preserve_ymax: bool = False
-    ) -> pg.PlotCurveItem:
-        assert x_var in {"timestamp", "elapsed"}, "x_var is not 'timestamp' or 'elapsed'!"
-        msg = f"y_var is not an available datapoint! choices are: {self.data[process]['data'].keys()}"
-        assert y_var in self.data[process]["data"].keys(), msg
+    ) -> pg.PlotCurveItem | None:
 
-        x = self.data[process][x_var]
-        y = self.data[process]["data"][y_var]
+        x = self.data[process].get(x_var, None)
+        y = self.data[process]["data"].get(y_var, None)
 
-        x = x[x != -1]
-        y = y[y != -1]
+        if x is None or y is None:
+            return None
+
+        x = x[~np.isnan(x)]
+        y = y[~np.isnan(y)]
 
         moving_avg_flag, moving_avg_window = moving_avg
         if moving_avg_flag:
@@ -251,8 +264,6 @@ class PerformancePlotter:
             self.remove_process(process)
 
         else:
-            # self.data[process]["timestamp"].append(timestamp)
-            # self.data[process]["elapsed"].append(elapsed)
             self.np_append(self.data[process]["timestamp"], timestamp)
             self.np_append(self.data[process]["elapsed"], elapsed)
 
@@ -262,7 +273,7 @@ class PerformancePlotter:
             self.choose_pen(process)
 
     def update_data_for_self(self):
-        # track elapsed and queue size for self
+        """track elapsed and queue size for self"""
         self.np_append(self.data["performance_plotter"]["timestamp"], datetime.utcnow().timestamp())
         self.np_append(self.data["performance_plotter"]["elapsed"], self.timer.elapsed())
         qsize = self.queue.qsize()
@@ -336,3 +347,155 @@ class PerformancePlotter:
 
 class NoProcessesLeft(Exception):
     pass
+
+
+class PerfPlotQueueItem(dict):
+    """Dictionary object with the specific format that the performance chart plotter expects.
+    Has methods for counting, tracking latency, and tracking processing times (via _delta method)"""
+    def __init__(
+            self,
+            process: str,
+            count: bool = True,
+            latency: bool = True,
+            delta: bool = False,
+            *args, **kwargs
+    ):
+        super(PerfPlotQueueItem, self).__init__(*args, **kwargs)
+
+        self["process"] = process
+        self["elapsed"] = None
+        self["timestamp"] = None
+        self["data"] = {}
+
+        if count:
+            self.total = 0  # running total counter
+            self.marginal = 0  # counter that gets reset, useful for tracking item processing rate
+            self["data"].update({"total": None, "marginal": None})
+
+        if latency:
+            self["data"].update({"avg_latency": None})
+            self.latencies = deque()
+
+        if delta:
+            self["data"].update({"delta": None})
+            self.deltas = deque()
+
+        self.timer = kwargs.get("module_timer", Timer())
+        if self.timer.get_start_time() is None:
+            self.timer.start()
+
+    def timedelta(self, log: bool = False) -> float:
+        """Returns
+        Use log=True to include the delta in the final item calc"""
+        delta = self.timer.delta()
+        if log:
+            self.deltas.append(delta)
+        self._update()
+        return delta
+
+    def latency(self, timestamp: float):
+        """Pass this method a timestamp to log the difference between utcnow and the timestamp."""
+        self.latencies.append(max(datetime.utcnow().timestamp() - timestamp, 0))
+
+    def count(self):
+        """Increment counters"""
+        self.total += 1
+        self.marginal += 1
+
+    def track(self, **kwargs) -> dict:
+        """Increment counters, log delta, and log latency in one call"""
+        log_time = kwargs.get("log_time", True)
+
+        if hasattr(self, "marginal"):
+            self.count()
+
+        if hasattr(self, "latency"):
+            timestamp = kwargs.get("timestamp", None)
+            if timestamp is not None:
+                self.latency(timestamp)
+
+        if hasattr(self, "deltas"):
+            self.timedelta(log=log_time)
+
+        return self
+
+    def _update(self) -> dict:
+        """Return a dict item ready for placing into performance plotter queue"""
+
+        self["timestamp"] = datetime.utcnow().timestamp()
+        self["elapsed"] = self.timer.elapsed()
+
+        if self["data"] is not None:
+            if hasattr(self, "marginal"):
+                self["data"]["total"] = self.total
+                self["data"]["marginal"] = self.marginal
+
+            if hasattr(self, "latencies"):
+                self["data"]["avg_latency"] = np.mean(self.latencies) if len(self.latencies) != 0 else 0
+
+            if hasattr(self, "deltas"):
+                self["data"]["delta"] = np.mean(self.deltas) if len(self.deltas) != 0 else 0
+
+        return self
+
+    def signal_end_item(self) -> dict:
+        """Return a dict item that will signal to performance plotter that this is the last item"""
+
+        self["timestamp"] = datetime.utcnow().timestamp()
+        self["elapsed"] = self.timer.elapsed()
+        self["data"] = None
+
+        return self
+
+    def send_to_queue(self, queue: Queue, log: bool = False):
+        """Send self's dict object into queue and clear iterables/counters"""
+        self._update()
+        item = copy.deepcopy(self)
+        queue.put(item)
+        if log:
+            logger.debug(f"Placed into queue: {item}")
+        self.reset()
+
+    def clear(self):
+        """Override dict's clear method"""
+        self.reset()
+
+    def reset(self) -> dict:
+        """Clear iterables/counters except running total. Also reset timedelta"""
+
+        if hasattr(self, "latencies"):
+            self.latencies.clear()
+        if hasattr(self, "marginal"):
+            self.marginal = 0
+        if hasattr(self, "deltas"):
+            self.deltas.clear()
+            self.timedelta()
+
+        self._update()
+        return self
+
+
+if __name__ == "__main__":
+    # testing
+    import time
+    test_queue = Queue()
+    a = PerfPlotQueueItem("dummy")
+    print(a)
+    a.track()
+    print(a)
+    time.sleep(1)
+    a.track()
+    print(a)
+    time.sleep(0.5)
+    a.track()
+    print(a)
+    a.send_to_queue(test_queue)
+    print("sent to queue")
+    print(a)
+    time.sleep(0.5)
+    print("pulling from queue")
+    a.signal_end_item()
+    print(a)
+
+
+

@@ -18,6 +18,7 @@ from tools.helper_tools import s_print
 from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval, run_once
 from worker_dataframes import MatchDataFrame, CandleDataFrame
+from plotting.performance import PerfPlotQueueItem
 
 import numpy as np
 
@@ -247,13 +248,17 @@ class OrderbookBuilder:
             logger.debug(f"Opened {load_feed_filepath} with gzip.")
 
         # performance monitoring
-        self.total_count = 0
-        self.count = 0
-        self.delays = deque()
         self.stats_queue = kwargs.get("stats_queue", None)
         if self.stats_queue is not None:
             assert type(self.stats_queue) == type(mp.Queue()), "passed stats queue is not a multiprocessing queue!"
-        self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
+            self.ob_builder_perf = PerfPlotQueueItem("orderbook_builder_thread", module_timer=self.module_timer)
+
+            self.order_insert_perf = PerfPlotQueueItem(
+                "order_insert", module_timer=self.module_timer, count=False, latency=False, delta=True)
+            self.order_remove_perf = PerfPlotQueueItem(
+                "order_remove", module_timer=self.module_timer, count=False, latency=False, delta=True)
+
+            self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
 
     def __load_queue_with_next(self):
         assert self.__load_feed is True
@@ -352,7 +357,7 @@ class OrderbookBuilder:
             except AttributeError as e:
                 logger.warning(f"Attribute Error: {e} caused by {item}")
             else:
-                self.__track_perf_data()
+                self.ob_builder_perf.track(timestamp=self.latest_timestamp.timestamp())
                 self.__lob_checked = False
 
         except q.Empty as e:
@@ -541,7 +546,9 @@ class OrderbookBuilder:
                         timestamp=timestamp
                     )
 
+                    self.order_insert_perf.timedelta()  # reset timer
                     self.lob.process(order, action="add")
+                    self.order_insert_perf.timedelta(log=True)  # log elapsed
 
                     if output_data:
                         self.output_data()
@@ -565,7 +572,9 @@ class OrderbookBuilder:
                         timestamp=timestamp,
                     )
 
+                    self.order_remove_perf.timedelta()  # reset timer
                     self.lob.process(order, action="remove")
+                    self.order_remove_perf.timedelta(log=True)  # log elapsed
 
                     if output_data:
                         self.output_data()
@@ -639,63 +648,39 @@ class OrderbookBuilder:
     def __end_output_data(self):
         if self.output_queue is not None:
             try:
-                # self.output_queue.put(None, block=False)
                 self.output_queue.put(None)
             except q.Full:
                 pass
             else:
                 logger.debug(f"Orderbook builder sent 'None' to output queue.")
 
-    def __track_perf_data(self):
-        # if self.latest_timestamp is not None:
-        delay = max(datetime.utcnow().timestamp() - self.latest_timestamp.timestamp(), 0)
-        self.delays.append(delay)
-        self.count += 1
-        self.total_count += 1
-
     @run_once_per_interval("stats_queue_interval")
     def __output_perf_data(self):
-
         if self.stats_queue is not None:
-            item = {
-                "process": "orderbook_builder_thread",
-                "timestamp": datetime.utcnow().timestamp(),
-                "elapsed": self.module_timer.elapsed(),
-                "data": {
-                    "total": self.total_count,
-                    "count": self.count,
-                    "avg_delay": np.mean(self.delays) if len(self.delays) != 0 else 0,
-                },
-            }
-            self.stats_queue.put(item)
-
-            self.count = 0
-            self.delays = deque()
+            self.ob_builder_perf.send_to_queue(self.stats_queue)
+            self.order_insert_perf.send_to_queue(self.stats_queue)
+            self.order_remove_perf.send_to_queue(self.stats_queue)
 
     @run_once
     def __end_perf_data(self):
         if self.stats_queue is not None:
-            item = {
-                "process": "orderbook_builder_thread",
-                "timestamp": datetime.utcnow().timestamp(),
-                "elapsed": self.module_timer.elapsed(),
-                "data": None,
-            }
-            self.stats_queue.put(item)
+            self.ob_builder_perf.signal_end_item()
+            self.order_insert_perf.signal_end_item()
+            self.order_remove_perf.signal_end_item()
+
+            self.ob_builder_perf.send_to_queue(self.stats_queue)
+            self.order_insert_perf.send_to_queue(self.stats_queue)
+            self.order_remove_perf.send_to_queue(self.stats_queue)
             logger.debug(f"Orderbook builder sent 'None' to stats queue.")
 
     def display_subscription(self, item: dict):
-        assert len(item.get("channels")) == 1
-        assert len(item["channels"][0]["product_ids"]) == 1
         market = item['channels'][0]['product_ids'][0]
-        assert market == self.__market
         line_output = f"Subscribed to {self.__exchange}'s '{market}' channel "
         line_output += f"for {item['channels'][0]['product_ids'][0]}"
         s_print(colored(line_output, "yellow"))
 
     def __log_summary(self):
         logger.info("________________________________ Summary ________________________________")
-        # Todo: move log_details into here
         if self.lob is not None:
             self.lob.log_details()
         logger.info(f"Matches processed = {self.matches.total_items:,}")
@@ -708,7 +693,7 @@ class OrderbookBuilder:
             average_timedelta = sum(self.__queue_stats["delta"], timedelta(0)) / len(self.__queue_stats["delta"])
             logger.info(f"Average latency = {average_timedelta}")
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
-            logger.info(f"Total items processed from queue = {self.total_count:,}")
+            logger.info(f"Total items processed from queue = {self.ob_builder_perf.total:,}")
 
         if len(self.__missing_sequences) != 0:
             logger.warning(f"{len(self.__missing_sequences)} missing sequences.")
@@ -717,6 +702,7 @@ class OrderbookBuilder:
 
         logger.info(f"________________________________ Summary End ________________________________")
 
+    # todo: condense next 3 methods into one
     @run_once
     def __log_first_sequence(self, sequence=None):
         """Store first sequence."""
@@ -733,7 +719,6 @@ class OrderbookBuilder:
         self.__snapshot_sequence = sequence
         logger.debug(f"Snapshot sequence = {self.__snapshot_sequence}")
 
-    # Todo: condense next three methods into one
     @run_once
     def __log_first_websocket_sequence(self, sequence=None):
         """Store first websocket sequence."""
@@ -852,7 +837,7 @@ class OrderbookBuilder:
         delta = datetime.utcnow() - self.__last_timestamp
         # logger.debug(delta.total_seconds())
         if delta.total_seconds() > 0.1:
-            dones_per_sec = self.count // delta.total_seconds()
+            dones_per_sec = self.ob_builder_perf.marginal // delta.total_seconds()
             logger.info(f"Items processed per second = {dones_per_sec:,}")
             self.__last_timestamp = datetime.utcnow()
 

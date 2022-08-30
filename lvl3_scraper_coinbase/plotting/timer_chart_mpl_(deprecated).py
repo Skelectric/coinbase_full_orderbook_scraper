@@ -1,7 +1,7 @@
 from multiprocessing import Queue
 import threading
 from loguru import logger
-from lvl3_scraper_coinbase.tools.timer import Timer
+from tools import Timer
 
 import numpy as np
 
@@ -92,7 +92,7 @@ class TimeChartPlotterMPL:
             timestamp, process, delta = self.get_data()
             print(timestamp, process, delta)
 
-            self_delta = self.timer.delta()
+            self_delta = self.timer.timedelta()
 
             self.ax.scatter(timestamp, delta, color='red', label=process)
 
