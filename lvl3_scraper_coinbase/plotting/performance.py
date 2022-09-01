@@ -166,12 +166,11 @@ class PerformancePlotter:
         try:
             try:
                 self.update_data()
-                self.update_data_for_self()
                 self.update_p1()
                 self.update_p2()
                 self.update_p3()
                 self.update_p4()
-                self.update_p5()
+                self.update_self_stats()
             # haven't figured out a way to stop event loop without raising ValueError
             except ValueError:
                 logger.debug(f"Performance plotter exited loop via Exception")
@@ -187,6 +186,11 @@ class PerformancePlotter:
 
         except NoProcessesLeft:
             self.close()
+
+    @run_once_per_interval("perf_plot_interval")
+    def update_self_stats(self):
+        self.update_data_for_self()
+        self.update_p5()
 
     def update_p1(self):
         self.p1.clear()
@@ -212,11 +216,10 @@ class PerformancePlotter:
     def update_p4(self):
         self.p4.clear()
         for process in (key for key in self.data.keys()):
-            item = self.make_curve_item(process, "elapsed", "delta", (True, 10))
+            item = self.make_curve_item(process, "elapsed", "delta", (True, 100))
             if item is not None:
                 self.p4.addItem(item)
 
-    @run_once_per_interval("perf_plot_interval")
     def update_p5(self):
         self.p5.clear()
         process = "performance_plotter"
@@ -278,14 +281,6 @@ class PerformancePlotter:
         self.np_append(self.data["performance_plotter"]["elapsed"], self.timer.elapsed())
         qsize = self.queue.qsize()
         self.np_append(self.data["performance_plotter"]["data"]["queue_size"], qsize)
-
-        # try:
-        #     qsize_prev = self.data["performance_plotter"]["data"]["queue_size"][-1]
-        # except IndexError:
-        #     qsive_prev = qsize
-        #
-        # self.np_append(self.data["performance_plotter"]["data"]["queue_size_delta"], qsize_prev)
-
         self.choose_pen("performance_plotter")
 
     def choose_pen(self, process: str) -> None:

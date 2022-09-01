@@ -648,7 +648,7 @@ class OrderbookBuilder:
     def __end_output_data(self):
         if self.output_queue is not None:
             try:
-                self.output_queue.put(None)
+                self.output_queue.put(None, timeout=1)
             except q.Full:
                 pass
             else:
