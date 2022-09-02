@@ -1,18 +1,29 @@
+# built-ins
+from collections.abc import Iterable
+
+# third-party
 from loguru import logger
-# from lvl3_scraper_coinbase.valuebook_v2 import valueList
+
+# homebrewr
 from tools.configure_loguru import configure_logger
 configure_logger()
 
 
 class AVLNode:
     """AVL BST node."""
-    __slots__ = ['parent', 'left', 'right', 'value', '_balance', '_height']
+    __slots__ = ['parent', 'left', 'right', 'key', 'value_obj']
 
-    def __init__(self, value):
+    def __init__(self, key, value=None):
         self.parent = None
         self.left = None
         self.right = None
-        self.value = value
+        self.key = key  # must be sortable
+        self.value_obj = value
+
+    def append(self, value):
+        """Calls value_obj's append method"""
+        if hasattr(self.value_obj, "append"):
+            self.value_obj.append(value)
 
     @property
     def get_root(self):
@@ -35,10 +46,10 @@ class AVLNode:
         are treated as zeros."""
 
         right_height = self.right.height if self.right is not None else 0
-        # logger.debug(f"node {self.value}'s right height = {right_height}")
+        # logger.debug(f"node {self.key}'s right height = {right_height}")
 
         left_height = self.left.height if self.left is not None else 0
-        # logger.debug(f"node {self.value}'s left height = {left_height}")
+        # logger.debug(f"node {self.key}'s left height = {left_height}")
 
         return right_height - left_height
 
@@ -86,7 +97,7 @@ class AVLNode:
 
     def _replace_child_in_parent(self, node=None):
         """Replaces node in parent on a remove() call."""
-        if self == self.parent.left:
+        if hasattr(self.parent, "left") and self == self.parent.left:
             self.parent.left = node
         else:
             self.parent.right = node
@@ -99,7 +110,7 @@ class AVLNode:
 
         if self.left is not None and self.right is not None:  # two children
 
-            logger.debug(f"Removed node {self.value} has 2 children.")
+            logger.debug(f"Removed {self} has 2 children.")
             parent = self.parent
             successor = self.right.min
             logger.debug(f"{successor} will replace {self}")
@@ -118,7 +129,7 @@ class AVLNode:
             successor.parent, successor.left = self.parent, self.left
 
             # Update references for ancestors and descendants
-            if isinstance(parent, AVLTree) or parent.value < successor.value:
+            if isinstance(parent, AVLTree) or parent.key < successor.key:
                 parent.right = successor
             else:
                 parent.left = successor
@@ -134,8 +145,8 @@ class AVLNode:
             self.display_tree(debug=True)
 
             # balance successor or right_adopter (successor's parent),
-            # whichever has the higher value (equivalent to being lower in the tree)
-            if right_adopter.height < successor.value:
+            # whichever has the higher key (equivalent to being lower in the tree)
+            if right_adopter.key > successor.key:
                 right_adopter.balance()
             else:
                 successor.balance()
@@ -143,19 +154,19 @@ class AVLNode:
             self.display_tree(debug=True)
 
         elif self.left is not None:  # only left child
-            logger.debug(f"Removed node {self.value} only has left child.")
+            logger.debug(f"Removed node {self.key} only has left child.")
             self._replace_child_in_parent(self.left)
             self.balance()
             self.display_tree(debug=True)
 
         elif self.right is not None:  # only right child
-            logger.debug(f"Removed node {self.value} only has right child.")
+            logger.debug(f"Removed node {self.key} only has right child.")
             self._replace_child_in_parent(self.right)
             self.balance()
             self.display_tree(debug=True)
 
         else:  # no children
-            logger.debug(f"Removed node {self.value} has no children. Clearing parent's child pointer...")
+            logger.debug(f"Removed node {self.key} has no children. Clearing parent's child pointer...")
             self._replace_child_in_parent()
             logger.debug(f"Now balancing...")
             self.balance()
@@ -206,7 +217,7 @@ class AVLNode:
         if grand_child is not None:
             grand_child.parent = self
 
-        if isinstance(self.parent, AVLTree) or self.value > self.parent.value:
+        if isinstance(self.parent, AVLTree) or self.key > self.parent.key:
             self.parent.right = child
         else:
             self.parent.left = child
@@ -223,7 +234,7 @@ class AVLNode:
         if grand_child is not None:
             grand_child.parent = self
 
-        if isinstance(self.parent, AVLTree) or self.value > self.parent.value:
+        if isinstance(self.parent, AVLTree) or self.key > self.parent.key:
             self.parent.right = child
         else:
             self.parent.left = child
@@ -272,7 +283,7 @@ class AVLNode:
 
         # Outside References (ancestors, descendants)
         # update ancestor's child reference
-        if parent.is_root or parent.value < grand_child.value:
+        if parent.is_root or parent.key < grand_child.key:
             parent.right = grand_child
         else:
             parent.left = grand_child
@@ -320,7 +331,7 @@ class AVLNode:
 
         # Outside References (ancestors, descendants)
         # update ancestor's child pointers
-        if isinstance(parent, AVLTree) or parent.value < grand_child.value:
+        if isinstance(parent, AVLTree) or parent.key < grand_child.key:
             parent.right = grand_child
         else:
             parent.left = grand_child
@@ -350,110 +361,133 @@ class AVLNode:
         node_count += self.right.get_child_count()
         return node_count
 
-    def check_reference_validity(self, raise_errors=False, msg_container: set = None) -> None | set:
-        """Check that children values follow left/right rule."""
-        if self.left is not None:
+    def validate(self, raise_errors=False, msg_set: set = None) -> None | set:
+        """Recursively check that children values follow left < parent < right branching rule
+            and that parent-child references are consistent.
+        Pass raise_errors=True to throw exceptions that stop code execution.
+            By default, this only passes a warning messages to the logger
+        Pass a set to the msg_container kwarg to store warning messages within."""
 
-            # check value validity
-            msg = f"self.value = {self.value}, self.left.value = {self.left.value}"
-            if raise_errors:
-                assert self.left.value < self.value, msg
+        def validate_wrapper(node, _raise_errors, _msg_set):
+
+            def validate_branching(__child, __direction):
+                if (__direction == "left" and __child.key >= __child.parent.key) or \
+                        (__direction == "right" and __child.key <= __child.parent.key):
+                    raise InvalidBranching(__child, __direction)
+
+            def validate_parenting(__child, __direction):
+                if (__direction == "left" and __child.parent.left.key != __child.key) or \
+                        (__direction == "right" and __child.parent.right.key != __child.key):
+                    raise InvalidParenting(__child, __direction)
+
+            if node is None:
+                return None
             else:
-                if self.left.value >= self.value:
-                    msg = "Invalid branching found: " + msg
-                    if msg_container is not None:
-                        msg_container.add(msg)
-                    else:
-                        logger.warning(msg)
+                for child, direction in ((node.left, "left"), (node.right, "right")):
+                    if child is not None:
+                        try:
+                            validate_branching(child, direction)
+                            validate_parenting(child, direction)
+                        except (InvalidBranching, InvalidParenting) as e:
+                            if raise_errors:
+                                raise e
+                            if msg_set is not None:
+                                msg_set.add(e)
+                            else:
+                                logger.warning(e)
+                        finally:
+                            validate_wrapper(child, _raise_errors=_raise_errors, _msg_set=_msg_set)
 
-            # check value validity
-            msg = f"self.value = {self.value}, self.left.parent.value = {self.left.parent.value}"
-            if raise_errors:
-                assert self.value == self.left.parent.value, msg
-            else:
-                if self.value != self.left.parent.value:
-                    msg = "Invalid parent/child references found: " + msg
-                    if msg_container is not None:
-                        msg_container.add(msg)
-                    else:
-                        logger.warning(msg)
+        validate_wrapper(self, _raise_errors=raise_errors, _msg_set=msg_set)
 
-            self.left.check_reference_validity(raise_errors=raise_errors, msg_container=msg_container)
-
-        if self.right is not None:
-
-            # check value validity
-            msg = f"self.value = {self.value}, self.right.value = {self.right.value}"
-            if raise_errors:
-                assert self.right.value > self.value, msg
-            else:
-                if self.right.value <= self.value:
-                    msg = "Invalid branching found: " + msg
-                    if msg_container is not None:
-                        msg_container.add(msg)
-                    else:
-                        logger.warning(msg)
-
-            # check parent validity
-            msg = f"self.value = {self.value}, self.right.parent.value = {self.right.parent.value}"
-            if raise_errors:
-                assert self.value == self.right.parent.value, msg
-            else:
-                if self.value != self.right.parent.value:
-                    msg = "Invalid parent/child references found: " + msg
-                    if msg_container is not None:
-                        msg_container.add(msg)
-                    else:
-                        logger.warning(msg)
-
-            self.right.check_reference_validity(raise_errors=raise_errors, msg_container=msg_container)
-
-        if msg_container is not None:
-            return msg_container
+        if msg_set is not None:
+            return msg_set
 
     def __str__(self):
-        s = f'Node({self.value}/h:{self.height}/b:{self.balance_factor})'
+        s = f'Node({self.key}/h:{self.height}/b:{self.balance_factor})'
         return s
 
     def __repr__(self):
-        l_value = self.left.value if self.left is not None else None
-        r_value = self.right.value if self.right is not None else None
-        p_value = self.parent.value if self.parent is not None else None
+        l_key = self.left.key if self.left is not None else None
+        r_key = self.right.key if self.right is not None else None
+        p_key = self.parent.key if self.parent is not None else None
 
-        s = f'Node({self.value}'
-        s += f'/l:{l_value}' if l_value is not None else ''
-        s += f'/r:{r_value}' if r_value is not None else ''
-        s += f'/p:{p_value}/h:{self.height}/b:{self.balance_factor})'
+        s = f'Node({self.key}'
+        s += f'/l:{l_key}' if l_key is not None else ''
+        s += f'/r:{r_key}' if r_key is not None else ''
+        s += f'/p:{p_key}/h:{self.height}/b:{self.balance_factor})'
         return s
 
     def __len__(self):
-        pass
-        # todo:
+        """Get length of node's value_obj if it exists. This assumes value_obj has a valid __len__ method.
+        Otherwise, return length of key (1)."""
+        if hasattr(self.value_obj, "__len__"):
+            return len(self.value_obj)
+        else:
+            return 1
 
 
 class AVLTree:
     """AVL BST Root Node."""
-    __slots__ = ["right", "value"]
+    __slots__ = ["right", "key", "nodes"]
 
     def __init__(self):
         # BST attributes
         self.right = None
-        self.value = 'Root'
+        self.key = 'Root'
+        self.nodes = []  # record of inserted nodes
 
     @property
     def height(self):
         if self.right is not None:
             return self.right.height + 1
+        else:
+            return 0
 
-    def insert(self, value) -> AVLNode:
+    @property
+    def keys(self):
+        return [node.key for node in self.nodes]
+
+    @staticmethod
+    def parse_object(obj, key_attr=None, value_attr=None) -> tuple:
+        """Support insertion of sortable keys,
+        iterables with first position being sortable, or classes with sortable key attributes"""
+
+        def check_obj_sortable(_obj):
+            """Check if obj is sortable, raise exception if it isn't."""
+            cls = _obj.__class__
+            if not hasattr(cls, "__lt__") or not hasattr(cls, "__gt__"):
+                raise UnsortableObjectException(_obj)
+
+        if key_attr is not None and value_attr is not None:
+            key = getattr(obj, key_attr)
+            check_obj_sortable(key)
+            value = getattr(obj, value_attr)
+            return key, value
+
+        elif isinstance(obj, Iterable):
+            key, *value = obj
+            return key, value
+
+        else:
+            check_obj_sortable(obj)
+            return obj, None
+
+    def insert(self, obj) -> AVLNode | None:
         """Iterative AVL Insert method to insert a new value."""
+        try:
+            key, value = self.parse_object(obj)
+        except UnsortableObjectException as e:
+            logger.warning(f"e")
+            return None
+
         current_node = self
-        logger.debug(f"Inserting object with value {value}")
+        logger.debug(f"Inserting object with key {key}, value {value}")
 
         while True:
-            if isinstance(current_node, AVLTree) or value > current_node.value:
+            if isinstance(current_node, AVLTree) or key > current_node.key:
                 if current_node.right is None:  # create new node in AVL tree to add value into
-                    node = AVLNode(value)
+                    node = AVLNode(key, value)
                     current_node.right = node
                     current_node.right.parent = current_node  # set new node's parent
                     logger.debug(f"Inserted new {current_node.right}")
@@ -461,14 +495,15 @@ class AVLTree:
                     logger.debug(f"Balancing parents...")
                     current_node.right.balance_parent()
                     self.display_tree()  # debugging
+                    self.nodes.append(node)  # keep references to inserted nodes in root instance
                     return node
                 else:
                     current_node = current_node.right
                     continue
 
-            elif value < current_node.value:
+            elif key < current_node.key:
                 if current_node.left is None:  # create new node in AVL tree to add value into
-                    node = AVLNode(value)
+                    node = AVLNode(key, value)
                     current_node.left = node
                     current_node.left.parent = current_node  # set new node's parent
                     logger.debug(f"Inserted new {current_node.left}")
@@ -476,6 +511,7 @@ class AVLTree:
                     logger.debug(f"Balancing parents...")
                     current_node.left.balance_parent()
                     self.display_tree()  # debugging
+                    self.nodes.append(node)  # keep references to inserted nodes in root instance
                     return node
                 else:
                     current_node = current_node.left
@@ -489,32 +525,44 @@ class AVLTree:
         """Iterative method to remove an existing Node."""
         logger.debug(f"Removing node with key {key}")
         try:
-            _node = self.get_node(key)
+            node = self.get_node(key)
         except MissingNodeException:
             return None
         else:
-            _node.remove()
-            return _node
+            node.remove()  # class method for removing nodes
+            self.nodes.remove(node)  # remove node from records in root's class attribute
+            return node
 
     def get_node(self, key) -> AVLNode:
         """Iterative method to find an existing Node using key"""
         current_node = self
         while True:
-            if isinstance(current_node, AVLTree) or key > current_node.value:
+            if isinstance(current_node, AVLTree):
+                if current_node.right is None:
+                    raise MissingNodeException
+                else:
+                    current_node = current_node.right
+            elif key > current_node.key and current_node.right is not None:
                 current_node = current_node.right
                 continue
-            elif key < current_node.value:
+            elif key < current_node.key and current_node.left is not None:
                 current_node = current_node.left
                 continue
-            elif key == current_node.value:
+            elif key == current_node.key:
                 logger.debug(f"Found {current_node}")
                 return current_node
             else:
                 raise MissingNodeException
 
-    def check_reference_validity(self, *args, **kwargs):
+    def validate(self, *args, **kwargs):
+        """Calls validate method on top AVLNode, which will
+            recursively check that children values follow left < parent < right branching rule
+            and that parent-child references are consistent.
+        Pass raise_errors=True to throw exceptions that stop code execution.
+            By default, this only passes a warning messages to the logger
+        Pass a set to the msg_container kwarg to store warning messages within."""
         if self.right is not None:
-            self.right.check_reference_validity(*args, **kwargs)
+            self.right.validate(*args, **kwargs)
 
     @property
     def is_balanced(self):
@@ -533,14 +581,14 @@ class AVLTree:
             return node_count
 
     def __str__(self):
-        r_value = self.right.value if self.right is not None else None
+        r_key = self.right.key if self.right is not None else None
         s = f'Root(h:{self.height})'
         return s
 
     def __repr__(self):
-        r_value = self.right.value if self.right is not None else None
+        r_key = self.right.key if self.right is not None else None
         s = f'Root('
-        s += f'r:{r_value}' if r_value is not None else ''
+        s += f'r:{r_key}' if r_key is not None else ''
         s += f'/h:{self.height})'
         return s
 
@@ -602,32 +650,24 @@ class AVLTree:
             return lines, n + m + u, max(p, q) + 2, n + u // 2
 
 
-# testing
-if __name__ == "__main__":
-    avl_tree = AVLTree()
-
-    # test insertion of several unique nodes
-    insert_values = [5, 10, 9, 3, 11]
-    nodes = []
-    for _value in insert_values:
-        _node = avl_tree.insert(_value)
-        nodes.append(_node)
-        print("active nodes: ", end='')
-        print(*nodes, sep=', ')
-    avl_tree.check_reference_validity()
-
-    # test simple removal of nodes
-    remove_values = [9, 11]
-    removed_nodes = []
-    for _value in remove_values:
-        _node = avl_tree.remove(_value)
-        removed_nodes.append(_node)
-        nodes.remove(_node)
-        print("active nodes: ", end='')
-        print(*nodes, sep=', ')
-        print("removed nodes: ", end='')
-        print(*removed_nodes, sep=', ')
-    avl_tree.check_reference_validity()
-
 class MissingNodeException(Exception):
     pass
+
+
+class UnsortableObjectException(Exception):
+    def __init__(self, obj):
+        self.message = f"{obj} is not sortable."
+        super().__init__(self.message)
+
+
+class InvalidBranching(Exception):
+    def __init__(self, obj: AVLNode, direction: str):
+        self.message = f"Invalid branching found. {direction}: {obj}, parent: {obj.parent}"
+        super().__init__(self.message)
+
+
+class InvalidParenting(Exception):
+    def __init__(self, obj: AVLNode, direction: str):
+        self.message = f"Invalid parent/child references found. {direction}: {obj}, parent: {obj.parent}"
+        super().__init__(self.message)
+

@@ -1,9 +1,14 @@
+# built-ins
 from itertools import islice
 from datetime import datetime
 import copy
+from enum import Enum, auto
+
+# third party
 from loguru import logger
 
-from lvl3_scraper_coinbase.avl_tree import LimitLevel, LimitLevelTree
+# homebrew
+from lvl3_scraper_coinbase.avl_tree import AVLTree, AVLNode
 from tools.configure_loguru import configure_logger
 configure_logger()
 
@@ -11,8 +16,8 @@ configure_logger()
 class LimitOrderBook:
     """Limit Order Book (LOB) Implementation"""
     def __init__(self):
-        self.bids = LimitLevelTree()
-        self.asks = LimitLevelTree()
+        self.bids = AVLTree()
+        self.asks = AVLTree()
         
         self.__bid_levels = {}  # price : size
         self.__ask_levels = {}  # price : size
@@ -113,7 +118,7 @@ class LimitOrderBook:
 
         # get corresponding limit_level and order_list
         limit_level = self.get_limit_level(popped_order)
-        order_list = limit_level.orders
+        order_list = limit_level.value_obj
 
         # Remove price level from set and update best bid or best ask
         if order_list.count == 0:
@@ -124,7 +129,7 @@ class LimitOrderBook:
             else:
                 self.__ask_levels.pop(popped_order.price)
 
-            assert isinstance(limit_level, LimitLevel)
+            assert isinstance(limit_level, AVLNode)
             limit_level.remove()
 
             # logger.debug(f"Removed node from tree.")
@@ -214,8 +219,8 @@ class LimitOrderBook:
 
         # Check that all pointers within AVL trees are correct
         # logger.debug(f"Checking pointer validity...")
-        self.bids.check_reference_validity(raise_errors=raise_errors, msg_container=self.error_msgs)
-        self.asks.check_reference_validity(raise_errors=raise_errors, msg_container=self.error_msgs)
+        self.bids.validate(raise_errors=raise_errors, msg_set=self.error_msgs)
+        self.asks.validate(raise_errors=raise_errors, msg_set=self.error_msgs)
 
         # Check that trees were balanced successfully
         if raise_errors:
@@ -264,9 +269,7 @@ class LimitOrderBook:
 class OrderList:
     """Doubly-Linked List Container Class.
     Stores head and tail orders, as well as count.
-    Keeps a reference to its parent LimitLevel Instance.
-    This container was added because it makes deleting the LimitLevels easier.
-    Has no other functionality."""
+    Keeps a reference to its parent LimitLevel Instance."""
     __slots__ = ["head", "tail", "parent_limit", "size", "count"]
 
     def __init__(self, parent_limit):
@@ -389,3 +392,8 @@ class Order:
                 self.previous_item.uid if self.previous_item is not None else None
             )
         )
+
+
+class Side(Enum):
+    ASK = auto
+    BID = auto
