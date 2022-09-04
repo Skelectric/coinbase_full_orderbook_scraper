@@ -1,5 +1,6 @@
 # built-ins
 from collections.abc import Iterable
+from typing import Callable
 
 # third-party
 from loguru import logger
@@ -344,6 +345,21 @@ class AVLNode:
 
         self.display_tree(debug=True)
 
+    def traverse(self, reverse: bool = False, func: Callable = print, **func_kwargs):
+        """Traverse AVL-tree in-order. If no function supplied to func, it will simply print the Node."""
+
+        def traverse_in_order(node):
+            child1 = getattr(node, direction[0])
+            child2 = getattr(node, direction[1])
+            if child1 is not None:
+                traverse_in_order(child1)
+            func(node, **func_kwargs)
+            if child2 is not None:
+                traverse_in_order(child2)
+
+        direction = ("left", "right") if not reverse else ("right", "left")
+        traverse_in_order(self)
+
     def get_child_count(self):
         node_count = 0
         if self.right is None and self.left is None:
@@ -360,6 +376,39 @@ class AVLNode:
         node_count += self.left.get_child_count()
         node_count += self.right.get_child_count()
         return node_count
+
+    # validate_via_traversal = traverse(validate_via_traversal)
+
+    @traverse
+    def validate_via_traversal(self, node, raise_errors=False, msg_set: set = None) -> None | set:
+
+        def validate_branching(__node):
+            if __node.left is not None and __node.left.key >= __node.key:
+                raise InvalidBranching(__node.left, "left")
+            if __node.right is not None and __node.right.key <= __node.key:
+                raise InvalidBranching(__node.right, "right")
+
+        def validate_parenting(__node):
+            if __node.left is not None and __node.left.parent is not __node:
+                raise InvalidParenting(__node.left, "left")
+            if __node.right is not None and __node.right.parent is not __node:
+                raise InvalidParenting(__node.right, "right")
+
+        try:
+            validate_branching(node)
+            validate_parenting(node)
+        except (InvalidBranching, InvalidParenting) as e:
+            if raise_errors:
+                raise e
+            if msg_set is not None:
+                msg_set.add(e)
+            else:
+                logger.warning(e)
+        else:
+            logger.debug(f"{node} OK")
+
+        return msg_set
+
 
     def validate(self, raise_errors=False, msg_set: set = None) -> None | set:
         """Recursively check that children values follow left < parent < right branching rule
@@ -554,15 +603,13 @@ class AVLTree:
             else:
                 raise MissingNodeException
 
-    def validate(self, *args, **kwargs):
-        """Calls validate method on top AVLNode, which will
-            recursively check that children values follow left < parent < right branching rule
-            and that parent-child references are consistent.
-        Pass raise_errors=True to throw exceptions that stop code execution.
-            By default, this only passes a warning messages to the logger
-        Pass a set to the msg_container kwarg to store warning messages within."""
+    def traverse(self, **kwargs):
         if self.right is not None:
-            self.right.validate(*args, **kwargs)
+            return self.right.traverse(**kwargs)
+
+    def validate(self, **kwargs):
+        if self.right is not None:
+            self.right.validate_via_traversal(**kwargs)
 
     @property
     def is_balanced(self):

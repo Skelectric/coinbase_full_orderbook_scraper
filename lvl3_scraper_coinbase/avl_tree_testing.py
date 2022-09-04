@@ -57,6 +57,17 @@ def test_removal_of_nonexisting_key():
         _node = avl_tree.remove(_key)
         print(f"Removed node = {_node}")
 
+def test_traversal():
+    logger.critical("TEST - AVL TRAVERSAL")
+    print("\nNodes in order:")
+    avl_tree.traverse()
+    print("\nNodes in reverse order:")
+    avl_tree.traverse(reverse=True)
+
+def test_validation_via_traversal():
+    logger.critical("TEST - VALIDATION VIA TRAVERSAL")
+    print("\nNodes in order:")
+    avl_tree.traverse()
 
 # testing
 if __name__ == "__main__":
@@ -68,9 +79,9 @@ if __name__ == "__main__":
     removed_nodes = []
 
     test_insertion_with_key_only()
-    test_removal_by_key()
-    test_duplicate_insertion_with_key_only()
-    test_removal_of_all_nodes_by_key()
-    test_removal_of_nonexisting_key()
-
-
+    # test_removal_by_key()
+    # test_duplicate_insertion_with_key_only()
+    # test_removal_of_all_nodes_by_key()
+    # test_removal_of_nonexisting_key()
+    # test_traversal()
+    test_validation_via_traversal()
