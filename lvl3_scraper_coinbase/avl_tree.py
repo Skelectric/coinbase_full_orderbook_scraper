@@ -1,6 +1,7 @@
 # built-ins
 from collections.abc import Iterable
 from typing import Callable
+from itertools import islice
 
 # third-party
 from loguru import logger
@@ -345,41 +346,40 @@ class AVLNode:
 
         self.display_tree(debug=True)
 
-    def traverse(self, reverse: bool = False, func: Callable = print, **func_kwargs):
+    @staticmethod
+    def traverse_in_order(node, func: Callable, direction: tuple[str, str] = ("left", "right"), **f_kw):
+        child1 = getattr(node, direction[0])
+        child2 = getattr(node, direction[1])
+        if child1 is not None:
+            AVLNode.traverse_in_order(child1, func, direction, **f_kw)
+        func(node, **f_kw)
+        if child2 is not None:
+            AVLNode.traverse_in_order(child2, func, direction, **f_kw)
+
+    def traverse(self, reverse: bool = False, func: Callable = None, **f_kw):
         """Traverse AVL-tree in-order. If no function supplied to func, it will simply print the Node."""
-
-        def traverse_in_order(node):
-            child1 = getattr(node, direction[0])
-            child2 = getattr(node, direction[1])
-            if child1 is not None:
-                traverse_in_order(child1)
-            func(node, **func_kwargs)
-            if child2 is not None:
-                traverse_in_order(child2)
-
         direction = ("left", "right") if not reverse else ("right", "left")
-        traverse_in_order(self)
+        if func is None:
+            self.print_nodes()
+            return None
+        self.traverse_in_order(self, func, direction, **f_kw)
 
-    def get_child_count(self):
-        node_count = 0
-        if self.right is None and self.left is None:
-            return node_count
-        if self.right is None:
-            node_count += 1
-            node_count += self.left.get_child_count()
-            return node_count
-        if self.left is None:
-            node_count += 1
-            node_count += self.right.get_child_count()
-            return node_count
-        node_count += 2
-        node_count += self.left.get_child_count()
-        node_count += self.right.get_child_count()
-        return node_count
+    def count_nodes(self):
+        def counter(*args):  # function that only counts up its count attribute
+            counter.count += 1
+        counter.count = 0
+        self.traverse_in_order(self, counter)
+        return counter.count
 
-    # validate_via_traversal = traverse(validate_via_traversal)
+    def print_nodes(self, per_line: int = 5):
+        def store(*args):
+            store.list.append(args[0])
+        store.list = []
+        self.traverse_in_order(self, store)
+        chunked = [store.list[i:i+per_line] for i in range(0, len(store.list), per_line)]
+        for chunk in chunked:
+            print(*chunk, sep=', ')
 
-    @traverse
     def validate_via_traversal(self, node, raise_errors=False, msg_set: set = None) -> None | set:
 
         def validate_branching(__node):
@@ -605,11 +605,11 @@ class AVLTree:
 
     def traverse(self, **kwargs):
         if self.right is not None:
-            return self.right.traverse(**kwargs)
+            self.right.traverse(**kwargs)
 
     def validate(self, **kwargs):
         if self.right is not None:
-            self.right.validate_via_traversal(**kwargs)
+            self.right.validate(**kwargs)
 
     @property
     def is_balanced(self):
@@ -623,8 +623,9 @@ class AVLTree:
         if self.right is None:
             return node_count
         else:
-            node_count += 1
-            node_count += self.right.get_child_count()
+            # node_count += 1
+            # node_count += self.right.get_child_count()
+            node_count = self.right.count_nodes()
             return node_count
 
     def __str__(self):

@@ -21,6 +21,15 @@ from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval, run_once
 from plotting.performance import PerfPlotQueueItem
 
+# ======================================================================================
+import sys
+# Platform specific imports and config
+if sys.platform == "win32":
+    from multiprocessing import Queue
+elif sys.platform == 'darwin':
+    from tools.mp_queue_OSX import Queue
+# ======================================================================================
+
 
 class WebsocketClient:
     def __init__(
@@ -28,7 +37,7 @@ class WebsocketClient:
             api: CoinbaseAPI,
             data_queue: queue.Queue = None,
             module_timer: Timer = None,
-            stats_queue: mp.Queue = None,
+            stats_queue: Queue = None,
             stats_queue_interval: float = None,
             *args, **kwargs
     ) -> None:

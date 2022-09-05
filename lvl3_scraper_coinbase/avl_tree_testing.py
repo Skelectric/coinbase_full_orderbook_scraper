@@ -64,6 +64,10 @@ def test_traversal():
     print("\nNodes in reverse order:")
     avl_tree.traverse(reverse=True)
 
+def test_traversal_count():
+    logger.critical("TEST - TRAVERSAL COUNT")
+    print("\nNode count = ", len(avl_tree))
+
 def test_validation_via_traversal():
     logger.critical("TEST - VALIDATION VIA TRAVERSAL")
     print("\nNodes in order:")
@@ -83,5 +87,6 @@ if __name__ == "__main__":
     # test_duplicate_insertion_with_key_only()
     # test_removal_of_all_nodes_by_key()
     # test_removal_of_nonexisting_key()
-    # test_traversal()
-    test_validation_via_traversal()
+    test_traversal()
+    test_traversal_count()
+    # test_validation_via_traversal()

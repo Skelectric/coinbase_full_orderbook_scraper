@@ -12,13 +12,22 @@ from matplotlib import pyplot as plt
 from matplotlib.backend_bases import NavigationToolbar2, Event
 matplotlib.use('TkAgg')
 
+# ======================================================================================
+import sys
+# Platform specific imports and config
+if sys.platform == "win32":
+    from multiprocessing import Queue
+elif sys.platform == 'darwin':
+    from tools.mp_queue_OSX import Queue
+# ======================================================================================
+
 
 def initialize_plotter(*args, **kwargs):
     """Needed for multiprocessing."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     queue = args[0]
     title = kwargs.get('title')
-    assert type(queue) == type(mp.Queue()), f"queue is not type Queue: {type(mp.Queue())}"
+    assert type(queue) == type(Queue()), f"queue is not type Queue: {type(Queue())}"
     depth_chart_plotter = DepthChartPlotter(queue=queue, title=title)
 
     # try:
@@ -63,7 +72,7 @@ NavigationToolbar2.home = new_home
 
 class DepthChartPlotter:
     # Todo: Build multi-orderbook support
-    def __init__(self, queue: mp.Queue, title=None, ):
+    def __init__(self, queue: Queue, title=None, ):
         self.queue = queue
         self.title = title
         plt.ion()

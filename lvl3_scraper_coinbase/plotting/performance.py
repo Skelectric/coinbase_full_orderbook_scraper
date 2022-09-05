@@ -1,4 +1,3 @@
-from multiprocessing import Queue
 from queue import Empty
 from itertools import cycle
 from random import randint
@@ -21,6 +20,12 @@ from collections import deque, defaultdict
 
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
+
+import sys
+if sys.platform == 'darwin':
+    from tools.mp_queue_OSX import Queue
+else:
+    from multiprocessing import Queue
 
 
 def initialize_plotter(queue: Queue, *args, **kwargs):

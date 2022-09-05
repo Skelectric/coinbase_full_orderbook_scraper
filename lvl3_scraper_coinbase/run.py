@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 import time
 import easygui
-import multiprocessing as mp
+from multiprocessing import Process
 
 # homebrew modules
 from api_coinbase import CoinbaseAPI
@@ -22,7 +22,13 @@ from tools.configure_loguru import configure_logger
 import plotting.depth_chart_mpl as dpth
 import plotting.performance as perf
 
-os.system('color')
+# ======================================================================================
+# Platform specific imports and config
+if sys.platform == "win32":
+    from multiprocessing import Queue
+    os.system('color')
+elif sys.platform == 'darwin':
+    from tools.mp_queue_OSX import Queue
 
 # ======================================================================================
 # Script Parameters
@@ -121,12 +127,12 @@ if __name__ == '__main__':
     depth_chart_process = None
     if PLOT_DEPTH_CHART and BUILD_ORDERBOOK:
         # noinspection PyRedeclaration
-        depth_chart_queue = mp.Queue(maxsize=1)
+        depth_chart_queue = Queue(maxsize=1)
         # assert hasattr(depth_chart_queue, "_maxsize")
         args = (depth_chart_queue, )
         kwargs = {"title": f"{EXCHANGE} - {MARKET}", }
         # noinspection PyRedeclaration
-        depth_chart_process = mp.Process(
+        depth_chart_process = Process(
             target=dpth.initialize_plotter,
             args=args,
             kwargs=kwargs,
@@ -145,7 +151,7 @@ if __name__ == '__main__':
             window = int(PERF_PLOT_WINDOW / PERF_PLOT_INTERVAL)
         logger.debug(f"Setting performance plot window to {window} points.")
         # noinspection PyRedeclaration
-        perf_plot_queue = mp.Queue()
+        perf_plot_queue = Queue()
         args = (perf_plot_queue, )
         kwargs = {
             "window": window,
@@ -155,7 +161,7 @@ if __name__ == '__main__':
             "perf_plot_interval": PERF_PLOT_INTERVAL,
         }
         # noinspection PyRedeclaration
-        perf_plot_process = mp.Process(
+        perf_plot_process = Process(
             target=perf.initialize_plotter,
             args=args,
             kwargs=kwargs,
