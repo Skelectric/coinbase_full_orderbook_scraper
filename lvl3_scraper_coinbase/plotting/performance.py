@@ -124,6 +124,10 @@ class PerformancePlotter:
         self.p5.setDownsampling(mode='subsample')
         self.p5.addLegend()
 
+        # restrict plot dimensions
+        self.pw.ci.layout.setColumnPreferredWidth(1, 250)
+        self.pw.ci.layout.setColumnPreferredWidth(2, 250)
+
         # self.pw.show()
 
         pen_colors = 'y', 'm', 'c', 'r', 'b', 'g', 'w'
@@ -295,13 +299,17 @@ class PerformancePlotter:
             self.data[process]["pen"] = next(self.pens)
 
     def get_data(self) -> any:
+        return self.queue.get(block=True)
+
+    def get_data_old(self) -> any:
         while True:
             try:
-                item = self.queue.get(block=False)
+                item = self.queue.get()
             except Empty:
                 continue
             else:
-                return item
+                if item is not None:
+                    return item
 
     def remove_process(self, process: str) -> None:
         logger.debug(f"Removing {process} from stats plotting.")

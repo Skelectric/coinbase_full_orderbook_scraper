@@ -63,7 +63,7 @@ ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_ORDERBOOK = True
 BUILD_MATCHES = True
 BUILD_CANDLES = True
-PLOT_DEPTH_CHART = True
+PLOT_DEPTH_CHART = False
 
 CANDLE_FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
@@ -330,12 +330,18 @@ if __name__ == '__main__':
     # script will hang at end because of QueueFeederThreads, so need to clear queues again.
     if perf_plot_queue is not None:
         while not perf_plot_queue.empty():
-            perf_plot_queue.get()
+            try:
+                item = perf_plot_queue.get(block=False)
+            except queue.Empty:
+                break
         perf_plot_queue.close()
 
     if depth_chart_queue is not None:
         while not depth_chart_queue.empty():
-            depth_chart_queue.get()
+            try:
+                item = depth_chart_queue.get(block=False)
+            except queue.Empty:
+                break
         depth_chart_queue.close()
 
     # logger.debug(f"perf_plot_queue.qsize() = {perf_plot_queue.qsize()}")

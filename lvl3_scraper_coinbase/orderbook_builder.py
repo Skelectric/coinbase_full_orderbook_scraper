@@ -5,7 +5,6 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 import queue as q
-import multiprocessing as mp
 from threading import Thread
 from itertools import islice, cycle
 import copy
@@ -20,7 +19,11 @@ from tools.run_once_per_interval import run_once_per_interval, run_once
 from worker_dataframes import MatchDataFrame, CandleDataFrame
 from plotting.performance import PerfPlotQueueItem
 
-import numpy as np
+import sys
+if sys.platform == 'darwin':
+    import tools.mp_queue_OSX as mp
+else:
+    import multiprocessing as mp
 
 
 class JustContinueException(Exception):
@@ -643,7 +646,10 @@ class OrderbookBuilder:
             }
             # logger.debug(f"PLACING item {self.output_item_counter}: bid_levels {bid_levels}")
             # logger.debug(f"PLACING item {self.output_item_counter}: ask_levels {ask_levels}")
-            self.output_queue.put(data, block=False)
+            try:
+                self.output_queue.put(data, block=False)
+            except q.Full:
+                pass
 
     def __end_output_data(self):
         if self.output_queue is not None:

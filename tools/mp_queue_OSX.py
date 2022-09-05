@@ -1,4 +1,8 @@
-import multiprocessing
+import multiprocessing as mp
+import multiprocessing.queues as mpq
+from loguru import logger
+from tools.configure_loguru import configure_logger
+configure_logger()
 
 
 class SharedCounter(object):
@@ -14,7 +18,7 @@ class SharedCounter(object):
     """
 
     def __init__(self, n=0):
-        self.count = multiprocessing.Value('i', n)
+        self.count = mp.Value('i', n)
 
     def increment(self, n=1):
         """ Increment the counter by n (default = 1) """
@@ -27,7 +31,7 @@ class SharedCounter(object):
         return self.count.value
 
 
-class Queue(multiprocessing.queues.Queue):
+class Queue(mpq.Queue):
     """ A portable implementation of multiprocessing.Queue.
     Because of multithreading / multiprocessing semantics, Queue.qsize() may
     raise the NotImplementedError exception on Unix platforms like Mac OS X
@@ -40,16 +44,33 @@ class Queue(multiprocessing.queues.Queue):
     """
 
     def __init__(self, *args, **kwargs):
-        super(Queue, self).__init__(*args, **kwargs)
+        super(Queue, self).__init__(*args, **kwargs, ctx=mp.get_context())
         self.size = SharedCounter(0)
 
+    def __getstate__(self):
+        """Help make MyQueue instance serializable.
+
+        Note that we record the parent class state, which is the state of the actual queue,
+        and the size of the queue, which is the state of MyQueue.
+
+        Self.size is a SharedCounter instance. It is itself serializable."""
+        return {
+            'parent_state': super().__getstate__(),
+            'size': self.size,
+        }
+
+    def __setstate__(self, state):
+        super().__setstate__(state['parent_state'])
+        self.size = state['size']
+
     def put(self, *args, **kwargs):
-        self.size.increment(1)
         super(Queue, self).put(*args, **kwargs)
+        self.size.increment(1)
 
     def get(self, *args, **kwargs):
+        item = super(Queue, self).get(*args, **kwargs)
         self.size.increment(-1)
-        return super(Queue, self).get(*args, **kwargs)
+        return item
 
     def qsize(self):
         """ Reliable implementation of multiprocessing.Queue.qsize() """
