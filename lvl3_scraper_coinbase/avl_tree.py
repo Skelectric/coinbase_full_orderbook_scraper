@@ -2,6 +2,7 @@
 from collections.abc import Iterable
 from typing import Callable
 from itertools import islice
+import inspect
 
 # third-party
 from loguru import logger
@@ -346,111 +347,70 @@ class AVLNode:
 
         self.display_tree(debug=True)
 
-    @staticmethod
-    def traverse_in_order(node, func: Callable, direction: tuple[str, str] = ("left", "right"), **f_kw):
-        child1 = getattr(node, direction[0])
-        child2 = getattr(node, direction[1])
-        if child1 is not None:
-            AVLNode.traverse_in_order(child1, func, direction, **f_kw)
-        func(node, **f_kw)
-        if child2 is not None:
-            AVLNode.traverse_in_order(child2, func, direction, **f_kw)
+    def traverse(self, reverse: bool = False, func: Callable = None, **kwargs):
+        """Traverse AVL-tree in-order. If no function supplied to func, it will yield the current node."""
 
-    def traverse(self, reverse: bool = False, func: Callable = None, **f_kw):
-        """Traverse AVL-tree in-order. If no function supplied to func, it will simply print the Node."""
+        def traverse_in_order(node, __direction: tuple[str, str], __func: Callable, **f_kw):
+            child1 = getattr(node, __direction[0])
+            child2 = getattr(node, __direction[1])
+            if child1 is not None:
+                traverse_in_order(child1, __direction, __func, **f_kw)
+            yield __func(node, **f_kw)
+            if child2 is not None:
+                traverse_in_order(child2, __direction, __func, **f_kw)
+
+        # debugging
+        curframe = inspect.currentframe()
+        calframe = inspect.getouterframes(curframe, 2)
+        logger.debug(f"caller name: {calframe[1][3]}")
+
         direction = ("left", "right") if not reverse else ("right", "left")
-        if func is None:
-            self.print_nodes()
-            return None
-        self.traverse_in_order(self, func, direction, **f_kw)
+        logger.debug(f"traversing {direction[0]} to {direction[1]}")
+
+        func = lambda args: args[0] if func is None else func
+        yield traverse_in_order(self, direction, func, **kwargs)
 
     def count_nodes(self):
-        def counter(*args):  # function that only counts up its count attribute
+        def counter(_):
             counter.count += 1
         counter.count = 0
-        self.traverse_in_order(self, counter)
+        self.traverse(func=counter)
         return counter.count
 
-    def print_nodes(self, per_line: int = 5):
-        def store(*args):
-            store.list.append(args[0])
-        store.list = []
-        self.traverse_in_order(self, store)
-        chunked = [store.list[i:i+per_line] for i in range(0, len(store.list), per_line)]
-        for chunk in chunked:
-            print(*chunk, sep=', ')
+    def validate(self, **kwargs) -> None:
+        """Traverse over tree and validate each node's child connections.
+        Pass raise_errors=True to throw Exceptions on unsuccessful validations.
+        By default, unsuccessful validations will just get logged as warnings.
+        Only one invalid test per parent node can be raised in this implementation."""
 
-    def validate_via_traversal(self, node, raise_errors=False, msg_set: set = None) -> None | set:
+        def wrapper(node, raise_errors):
+            def validate_branching(__node):
+                if __node.left is not None and __node.left.key >= __node.key:
+                    raise InvalidBranching(__node.left, "left")
+                if __node.right is not None and __node.right.key <= __node.key:
+                    raise InvalidBranching(__node.right, "right")
 
-        def validate_branching(__node):
-            if __node.left is not None and __node.left.key >= __node.key:
-                raise InvalidBranching(__node.left, "left")
-            if __node.right is not None and __node.right.key <= __node.key:
-                raise InvalidBranching(__node.right, "right")
+            def validate_parenting(__node):
+                if __node.left is not None and __node.left.parent is not __node:
+                    raise InvalidParenting(__node.left, "left")
+                if __node.right is not None and __node.right.parent is not __node:
+                    raise InvalidParenting(__node.right, "right")
 
-        def validate_parenting(__node):
-            if __node.left is not None and __node.left.parent is not __node:
-                raise InvalidParenting(__node.left, "left")
-            if __node.right is not None and __node.right.parent is not __node:
-                raise InvalidParenting(__node.right, "right")
-
-        try:
-            validate_branching(node)
-            validate_parenting(node)
-        except (InvalidBranching, InvalidParenting) as e:
-            if raise_errors:
-                raise e
-            if msg_set is not None:
-                msg_set.add(e)
+            try:
+                validate_branching(node)
+                validate_parenting(node)
+            except (InvalidBranching, InvalidParenting) as e:
+                if raise_errors:
+                    raise e
+                else:
+                    logger.warning(e)
             else:
-                logger.warning(e)
-        else:
-            logger.debug(f"{node} OK")
+                logger.debug(f"{node} OK")
 
-        return msg_set
-
-
-    def validate(self, raise_errors=False, msg_set: set = None) -> None | set:
-        """Recursively check that children values follow left < parent < right branching rule
-            and that parent-child references are consistent.
-        Pass raise_errors=True to throw exceptions that stop code execution.
-            By default, this only passes a warning messages to the logger
-        Pass a set to the msg_container kwarg to store warning messages within."""
-
-        def validate_wrapper(node, _raise_errors, _msg_set):
-
-            def validate_branching(__child, __direction):
-                if (__direction == "left" and __child.key >= __child.parent.key) or \
-                        (__direction == "right" and __child.key <= __child.parent.key):
-                    raise InvalidBranching(__child, __direction)
-
-            def validate_parenting(__child, __direction):
-                if (__direction == "left" and __child.parent.left.key != __child.key) or \
-                        (__direction == "right" and __child.parent.right.key != __child.key):
-                    raise InvalidParenting(__child, __direction)
-
-            if node is None:
-                return None
-            else:
-                for child, direction in ((node.left, "left"), (node.right, "right")):
-                    if child is not None:
-                        try:
-                            validate_branching(child, direction)
-                            validate_parenting(child, direction)
-                        except (InvalidBranching, InvalidParenting) as e:
-                            if raise_errors:
-                                raise e
-                            if msg_set is not None:
-                                msg_set.add(e)
-                            else:
-                                logger.warning(e)
-                        finally:
-                            validate_wrapper(child, _raise_errors=_raise_errors, _msg_set=_msg_set)
-
-        validate_wrapper(self, _raise_errors=raise_errors, _msg_set=msg_set)
-
-        if msg_set is not None:
-            return msg_set
+        kwargs = {
+            "raise_errors": kwargs.get("raise_errors", False),
+        }
+        self.traverse(func=wrapper, **kwargs)
 
     def __str__(self):
         s = f'Node({self.key}/h:{self.height}/b:{self.balance_factor})'
@@ -478,24 +438,36 @@ class AVLNode:
 
 class AVLTree:
     """AVL BST Root Node."""
-    __slots__ = ["right", "key", "nodes"]
+    __slots__ = ["right", "key", "node_count"]
 
     def __init__(self):
         # BST attributes
         self.right = None
         self.key = 'Root'
-        self.nodes = []  # record of inserted nodes
+        self.node_count = 0
 
     @property
     def height(self):
-        if self.right is not None:
+        if isinstance(self.right, AVLNode):
             return self.right.height + 1
         else:
             return 0
 
     @property
+    def nodes(self):
+        if isinstance(self.right, AVLNode):
+            traversal = self.traverse()
+        return traversal
+
+    @property
     def keys(self):
-        return [node.key for node in self.nodes]
+        def get_keys(*args):
+            assert isinstance(args[0], AVLNode)
+            keys.append(args[0].key)
+        keys = []
+        if isinstance(self.right, AVLNode):
+            self.traverse(func=get_keys)
+        return keys
 
     @staticmethod
     def parse_object(obj, key_attr=None, value_attr=None) -> tuple:
@@ -544,7 +516,7 @@ class AVLTree:
                     logger.debug(f"Balancing parents...")
                     current_node.right.balance_parent()
                     self.display_tree()  # debugging
-                    self.nodes.append(node)  # keep references to inserted nodes in root instance
+                    self.node_count += 1
                     return node
                 else:
                     current_node = current_node.right
@@ -560,7 +532,7 @@ class AVLTree:
                     logger.debug(f"Balancing parents...")
                     current_node.left.balance_parent()
                     self.display_tree()  # debugging
-                    self.nodes.append(node)  # keep references to inserted nodes in root instance
+                    self.node_count += 1
                     return node
                 else:
                     current_node = current_node.left
@@ -579,7 +551,7 @@ class AVLTree:
             return None
         else:
             node.remove()  # class method for removing nodes
-            self.nodes.remove(node)  # remove node from records in root's class attribute
+            self.node_count -= 1
             return node
 
     def get_node(self, key) -> AVLNode:
@@ -604,11 +576,15 @@ class AVLTree:
                 raise MissingNodeException
 
     def traverse(self, **kwargs):
-        if self.right is not None:
+        def wrapper():
             self.right.traverse(**kwargs)
+        if isinstance(self.right, AVLNode):
+            return wrapper
+        else:
+            return None
 
     def validate(self, **kwargs):
-        if self.right is not None:
+        if isinstance(self.right, AVLNode):
             self.right.validate(**kwargs)
 
     @property
@@ -619,17 +595,9 @@ class AVLTree:
 
     def __len__(self):
         """Size of tree"""
-        node_count = 0
-        if self.right is None:
-            return node_count
-        else:
-            # node_count += 1
-            # node_count += self.right.get_child_count()
-            node_count = self.right.count_nodes()
-            return node_count
+        return self.node_count
 
     def __str__(self):
-        r_key = self.right.key if self.right is not None else None
         s = f'Root(h:{self.height})'
         return s
 
