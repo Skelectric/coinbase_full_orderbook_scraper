@@ -347,71 +347,6 @@ class AVLNode:
 
         self.display_tree(debug=True)
 
-    def traverse(self, reverse: bool = False, func: Callable = None, **kwargs):
-        """Traverse AVL-tree in-order. If no function supplied to func, it will yield the current node."""
-
-        def traverse_in_order(node, __direction: tuple[str, str], __func: Callable, **f_kw):
-            child1 = getattr(node, __direction[0])
-            child2 = getattr(node, __direction[1])
-            if child1 is not None:
-                traverse_in_order(child1, __direction, __func, **f_kw)
-            yield __func(node, **f_kw)
-            if child2 is not None:
-                traverse_in_order(child2, __direction, __func, **f_kw)
-
-        # debugging
-        curframe = inspect.currentframe()
-        calframe = inspect.getouterframes(curframe, 2)
-        logger.debug(f"caller name: {calframe[1][3]}")
-
-        direction = ("left", "right") if not reverse else ("right", "left")
-        logger.debug(f"traversing {direction[0]} to {direction[1]}")
-
-        func = lambda args: args[0] if func is None else func
-        yield traverse_in_order(self, direction, func, **kwargs)
-
-    def count_nodes(self):
-        def counter(_):
-            counter.count += 1
-        counter.count = 0
-        self.traverse(func=counter)
-        return counter.count
-
-    def validate(self, **kwargs) -> None:
-        """Traverse over tree and validate each node's child connections.
-        Pass raise_errors=True to throw Exceptions on unsuccessful validations.
-        By default, unsuccessful validations will just get logged as warnings.
-        Only one invalid test per parent node can be raised in this implementation."""
-
-        def wrapper(node, raise_errors):
-            def validate_branching(__node):
-                if __node.left is not None and __node.left.key >= __node.key:
-                    raise InvalidBranching(__node.left, "left")
-                if __node.right is not None and __node.right.key <= __node.key:
-                    raise InvalidBranching(__node.right, "right")
-
-            def validate_parenting(__node):
-                if __node.left is not None and __node.left.parent is not __node:
-                    raise InvalidParenting(__node.left, "left")
-                if __node.right is not None and __node.right.parent is not __node:
-                    raise InvalidParenting(__node.right, "right")
-
-            try:
-                validate_branching(node)
-                validate_parenting(node)
-            except (InvalidBranching, InvalidParenting) as e:
-                if raise_errors:
-                    raise e
-                else:
-                    logger.warning(e)
-            else:
-                logger.debug(f"{node} OK")
-
-        kwargs = {
-            "raise_errors": kwargs.get("raise_errors", False),
-        }
-        self.traverse(func=wrapper, **kwargs)
-
     def __str__(self):
         s = f'Node({self.key}/h:{self.height}/b:{self.balance_factor})'
         return s
@@ -450,27 +385,38 @@ class AVLTree:
     def height(self):
         if isinstance(self.right, AVLNode):
             return self.right.height + 1
-        else:
-            return 0
+        return 0
+
+    def nodes(self, reverse=False):
+        if isinstance(self.right, AVLNode):
+            return [node for node in self.traverse(reverse=reverse)]
+        return []
+
+    def keys(self, reverse=False):
+        if isinstance(self.right, AVLNode):
+            def get_key(*args, **_):
+                return args[0].key
+            return [key for key in self.traverse(reverse=reverse, func=get_key)]
+        return []
 
     @property
-    def nodes(self):
+    def is_balanced(self):
         if isinstance(self.right, AVLNode):
-            traversal = self.traverse()
-        return traversal
+            return self.right.is_balanced
+        return True
 
-    @property
-    def keys(self):
-        def get_keys(*args):
-            assert isinstance(args[0], AVLNode)
-            keys.append(args[0].key)
-        keys = []
+    def count_nodes(self):
         if isinstance(self.right, AVLNode):
-            self.traverse(func=get_keys)
-        return keys
+            def counter(_):
+                counter.count += 1
+            counter.count = 0
+            for _ in self.traverse(func=counter):
+                pass
+            return counter.count
+        return 0
 
     @staticmethod
-    def parse_object(obj, key_attr=None, value_attr=None) -> tuple:
+    def __parse_object(obj, key_attr=None, value_attr=None) -> tuple:
         """Support insertion of sortable keys,
         iterables with first position being sortable, or classes with sortable key attributes"""
 
@@ -497,7 +443,7 @@ class AVLTree:
     def insert(self, obj) -> AVLNode | None:
         """Iterative AVL Insert method to insert a new value."""
         try:
-            key, value = self.parse_object(obj)
+            key, value = self.__parse_object(obj)
         except UnsortableObjectException as e:
             logger.warning(f"e")
             return None
@@ -575,23 +521,89 @@ class AVLTree:
             else:
                 raise MissingNodeException
 
-    def traverse(self, **kwargs):
-        def wrapper():
-            self.right.traverse(**kwargs)
-        if isinstance(self.right, AVLNode):
-            return wrapper
-        else:
-            return None
+    def traverse(self, reverse: bool = False, func: Callable = None, **kwargs):
+        """Generator object for traversing tree. If no function supplied to func, it will yield the current node."""
 
-    def validate(self, **kwargs):
-        if isinstance(self.right, AVLNode):
-            self.right.validate(**kwargs)
+        def traverse_in_order(node, __direction: tuple[str, str], __func: Callable, **f_kw):
+            """LNR Traversal"""
+            child1 = getattr(node, __direction[0])
+            child2 = getattr(node, __direction[1])
+            if child1 is not None:
+                yield from traverse_in_order(child1, __direction, __func, **f_kw)
+            yield __func(node, **f_kw)
+            if child2 is not None:
+                yield from traverse_in_order(child2, __direction, __func, **f_kw)
 
-    @property
-    def is_balanced(self):
-        if self.right is not None:
-            return self.right.is_balanced
-        return True
+        def return_node(*args, **_):
+            """Return node"""
+            return args[0]
+
+        # debugging to check what called this method
+        # curframe = inspect.currentframe()
+        # calframe = inspect.getouterframes(curframe, 2)
+        # logger.debug(f"AVLTree.traverse called by: {calframe[1][3]}")
+
+        # derive direction
+        direction = ("left", "right") if not reverse else ("right", "left")
+
+        # default to returning node when no func supplied
+        func = return_node if func is None else func
+
+        yield from traverse_in_order(self.right, direction, func, **kwargs)
+
+    def validate(self, **kwargs) -> None:
+        """Traverse over tree and validate each node's child connections.
+        Pass raise_errors=True to throw Exceptions on unsuccessful validations.
+        By default, unsuccessful validations will just get logged as warnings.
+        Pass verbose=True to log nodes that passed validations."""
+
+        def wrapper(node, raise_errors: bool = False, verbose: bool = False):
+            def validate_branching_left(__node):
+                if __node.left is not None and __node.left.key >= __node.key:
+                    node_validity[__node.left] = False
+                    raise InvalidBranching(__node, "left")
+
+            def validate_branching_right(__node):
+                if __node.right is not None and __node.right.key <= __node.key:
+                    node_validity[__node.right] = False
+                    raise InvalidBranching(__node, "right")
+
+            def validate_parenting_left(__node):
+                if __node.left is not None and __node.left.parent is not __node:
+                    node_validity[__node.left] = False
+                    raise InvalidParenting(__node, "left")
+
+            def validate_parenting_right(__node):
+                if __node.right is not None and __node.right.parent is not __node:
+                    node_validity[__node.right] = False
+                    raise InvalidParenting(__node, "right")
+
+            def run(validation_function: Callable, __node):
+                try:
+                    validation_function(__node)
+                except (InvalidBranching, InvalidParenting) as e:
+                    nonlocal valid
+                    valid = False
+                    if raise_errors:
+                        raise e
+                    else:
+                        logger.warning(e)
+
+            run(validate_branching_left, node)
+            run(validate_branching_right, node)
+            run(validate_parenting_left, node)
+            run(validate_parenting_right, node)
+
+            if verbose:
+                node_validity[node] = True if node_validity.get(node, None) is None else node_validity[node]
+
+        node_validity = {}
+
+        for _ in self.traverse(func=wrapper, **kwargs):
+            pass
+
+        for __node, valid in node_validity.items():
+            logger.debug(f"{__node} OK") if valid else logger.warning(f"{__node} INVALID")
 
     def __len__(self):
         """Size of tree"""
@@ -678,12 +690,14 @@ class UnsortableObjectException(Exception):
 
 class InvalidBranching(Exception):
     def __init__(self, obj: AVLNode, direction: str):
-        self.message = f"Invalid branching found. {direction}: {obj}, parent: {obj.parent}"
+        child = getattr(obj, direction)
+        self.message = f"Invalid branching found. parent: {repr(obj)}, {direction}: {repr(child)}"
         super().__init__(self.message)
 
 
 class InvalidParenting(Exception):
     def __init__(self, obj: AVLNode, direction: str):
-        self.message = f"Invalid parent/child references found. {direction}: {obj}, parent: {obj.parent}"
+        child = getattr(obj, direction)
+        self.message = f"Invalid parent/child reference found. parent: {repr(obj)}, {direction}: {repr(child)}"
         super().__init__(self.message)
 

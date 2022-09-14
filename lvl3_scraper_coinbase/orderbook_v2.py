@@ -190,7 +190,6 @@ class LimitOrderBook:
         else:
             return {k: self.__ask_levels[k] for k in sorted(self.__ask_levels.keys())}
 
-
     @property
     def timestamp(self, datetime_format=False):
         return self.__timestamp
@@ -313,6 +312,7 @@ class Order:
                  timestamp=None, next_item=None, previous_item=None):
         # Data values
         self.uid = uid
+        # self.side = Side.BID if is_bid else Side.ASK
         self.is_bid = is_bid
         self.size = size
         self.price = price

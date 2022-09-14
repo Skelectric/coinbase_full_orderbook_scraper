@@ -1,74 +1,58 @@
 from loguru import logger
-from avl_tree import AVLTree, AVLNode
+from avl_tree import AVLTree, AVLNode, InvalidParenting, InvalidBranching
+from tools.configure_loguru import configure_logger
+configure_logger(level="DEBUG")
 
 
 def test_insertion_with_key_only():
     logger.critical("TEST - SIMPLE INSERTION BY KEY")
+
     for _key in insert_keys:
         _node = avl_tree.insert(_key)
-        msg = "active nodes: " + str(avl_tree)
-        for node in avl_tree.nodes:
-            msg += f", {node}"
-        logger.info(msg)
+    logger.info(f"active nodes: {avl_tree.nodes()}")
+
     avl_tree.validate(raise_errors=True)
-    assert len(avl_tree) == len(insert_keys)
+    assert sorted(insert_keys) == sorted(avl_tree.keys()), f"{sorted(insert_keys)} not eq to {sorted(avl_tree.keys())}"
+
+
+def test_forward_and_reverse():
+    logger.critical("TEST - FORWARD AND REVERSE TRAVERSAL")
+    assert sorted(insert_keys) == avl_tree.keys(), f"{sorted(insert_keys)} not eq to {avl_tree.keys()}"
+    assert sorted(insert_keys)[::-1] == avl_tree.keys(reverse=True), \
+        f"{sorted(insert_keys)[::-1]} not eq to {avl_tree.keys(reverse=True)}"
 
 
 def test_removal_by_key():
     logger.critical("TEST - SIMPLE REMOVAL BY KEY")
-    starting_len = len(avl_tree)
     for _key in remove_keys:
         _node = avl_tree.remove(_key)
         removed_nodes.append(_node)
 
-        msg = "active nodes: " + str(avl_tree)
-        for node in avl_tree.nodes:
-            msg += f", {node}"
-        logger.info(msg)
-        msg = "removed nodes:" + str(avl_tree)
-        for node in removed_nodes:
-            msg += f", {node}"
-        logger.info(msg)
+        logger.info(f"active nodes: {avl_tree.nodes()}")
+        logger.info(f"removed nodes: {removed_nodes}")
 
     avl_tree.validate(raise_errors=True)
-    assert len(avl_tree) == starting_len - len(remove_keys)
+    assert sorted(list(set(insert_keys) - set(remove_keys))) == sorted(avl_tree.keys())
 
 
 def test_duplicate_insertion_with_key_only():
     logger.critical("TEST - SIMPLE DUPLICATE INSERTION BY KEY")
-    key = avl_tree.nodes[0].key
+    starting_nodes = set(avl_tree.nodes())
+    key = avl_tree.keys()[0]
     _node = avl_tree.insert(key)
-
-    msg = "active nodes: " + str(avl_tree)
-    for node in avl_tree.nodes:
-        msg += f", {node}"
-    logger.info(msg)
-    msg = "removed nodes:" + str(avl_tree)
-    for node in removed_nodes:
-        msg += f", {node}"
-    logger.info(msg)
-
-    avl_tree.validate()
-    print(len(avl_tree))
+    assert starting_nodes == set(avl_tree.nodes())
+    logger.info("OK")
 
 
 def test_removal_of_all_nodes_by_key():
     logger.critical("TEST - REMOVING ALL NODES BY KEY")
-    for _key in avl_tree.keys:
+    for _key in avl_tree.keys():
         _node = avl_tree.remove(_key)
         removed_nodes.append(_node)
 
-        msg = "active nodes: " + str(avl_tree)
-        for node in avl_tree.nodes:
-            msg += f", {node}"
-        logger.info(msg)
-        msg = "removed nodes:" + str(avl_tree)
-        for node in removed_nodes:
-            msg += f", {node}"
-        logger.info(msg)
-
-    avl_tree.validate()
-    print(len(avl_tree))
+    logger.info(f"active nodes: {avl_tree.nodes()}")
+    logger.info(f"removed nodes: {removed_nodes}")
+    assert avl_tree.nodes() == []
 
 
 def test_removal_of_nonexisting_key():
@@ -79,31 +63,26 @@ def test_removal_of_nonexisting_key():
         logger.info(msg)
 
 
-def test_traversal():
-    logger.critical("TEST - AVL TRAVERSAL")
-    logger.info("Nodes in order:")
-    avl_tree.traverse()
-    logger.info("Nodes in reverse order:")
-    avl_tree.traverse(reverse=True)
-
-
 def test_traversal_count():
     logger.critical("TEST - TRAVERSAL COUNT")
     msg = f"Node count = {len(avl_tree)}"
     logger.info(msg)
+    assert len(avl_tree) == avl_tree.count_nodes()
 
 
-def test_validation_via_traversal():
+def test_validation():
     logger.critical("TEST - VALIDATION VIA TRAVERSAL")
-    logger.info("Testing good tree - Nodes in order:")
-    avl_tree.validate()
-    logger.info("Testing bad tree - Nodes in order:")
+    for _key in insert_keys:
+        _node = avl_tree.insert(_key)
+    logger.info("Testing good tree...")
+    avl_tree.validate(verbose=False)
+    logger.info("Testing bad tree...")
     bad_tree = generate_broken_tree()
-    bad_tree.validate()
+    bad_tree.validate(verbose=False)
 
 
 def generate_broken_tree() -> AVLTree:
-    logger.warning("Generating broken tree for test")
+    logger.debug("Generating broken tree for test")
     bad_tree = AVLTree()
     node1 = AVLNode(4)
     node2 = AVLNode(10)
@@ -126,10 +105,10 @@ if __name__ == "__main__":
     removed_nodes = []
 
     test_insertion_with_key_only()
-    # test_removal_by_key()
-    # test_duplicate_insertion_with_key_only()
-    # test_removal_of_all_nodes_by_key()
-    # test_removal_of_nonexisting_key()
-    test_traversal()
+    test_forward_and_reverse()
     test_traversal_count()
-    test_validation_via_traversal()
+    test_removal_by_key()
+    test_duplicate_insertion_with_key_only()
+    test_removal_of_all_nodes_by_key()
+    test_removal_of_nonexisting_key()
+    test_validation()
