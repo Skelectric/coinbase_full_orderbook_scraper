@@ -95,6 +95,13 @@ def generate_broken_tree() -> AVLTree:
     return bad_tree
 
 
+def display_tree():
+    insert_keys = [72, 5, 32, 62, 12]
+    for _key in insert_keys:
+        _node = avl_tree.insert(_key)
+        avl_tree.display_tree()
+
+
 # testing
 if __name__ == "__main__":
     avl_tree = AVLTree()
@@ -104,11 +111,13 @@ if __name__ == "__main__":
     remove_nonexisting_key = [20]
     removed_nodes = []
 
-    test_insertion_with_key_only()
-    test_forward_and_reverse()
-    test_traversal_count()
-    test_removal_by_key()
-    test_duplicate_insertion_with_key_only()
-    test_removal_of_all_nodes_by_key()
-    test_removal_of_nonexisting_key()
-    test_validation()
+    display_tree()
+
+    # test_insertion_with_key_only()
+    # test_forward_and_reverse()
+    # test_traversal_count()
+    # test_removal_by_key()
+    # test_duplicate_insertion_with_key_only()
+    # test_removal_of_all_nodes_by_key()
+    # test_removal_of_nonexisting_key()
+    # test_validation()

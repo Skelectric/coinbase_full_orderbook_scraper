@@ -286,7 +286,7 @@ class AVLNode:
 
         # Outside References (ancestors, descendants)
         # update ancestor's child reference
-        if parent.is_root or parent.key < grand_child.key:
+        if isinstance(parent, AVLTree) or parent.key < grand_child.key:
             parent.right = grand_child
         else:
             parent.left = grand_child
