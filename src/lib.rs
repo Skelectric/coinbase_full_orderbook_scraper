@@ -17,7 +17,8 @@ type Link<K, V> = Option<NodePtr<K, V>>;
 type BoxedNode<K, V> = Box<Node<K, V>>;
 
 /// AVL tree struct with a reference to the root and a node count
-pub struct AVLTree<K, V> {
+pub struct AVLTree<K, V>
+    where K: Display + Debug + PartialOrd + Clone + ToString {
     root: Link<K, V>,
     len: usize,
     _boo: PhantomData<K>,
@@ -176,6 +177,83 @@ impl<K, V> AVLTree<K, V>
         }
     }
 
+    /// find whether a particular link is a root, left or right branch
+    fn find_branch_from_parent(&self, link: &Link<K, V>) -> Branch {
+        unsafe {
+            let node = &(*link.unwrap().as_ptr());
+            if node.parent.is_none() {
+                Branch::Root
+            } else {
+                let parent_key = get_key(&node.parent).unwrap();
+                match node.key.partial_cmp(&parent_key) {
+                    Some(Ordering::Greater) => Branch::Right,
+                    Some(Ordering::Less) => Branch::Left,
+                    _ => Branch::None
+                }
+            }
+        }
+    }
+
+    /// print stack of keys from passed link to root. primarily for debugging
+    fn trace_parentage(&self, link: &Link<K, V>) {
+        let mut stack: Vec<K> = Vec::new();
+        unsafe {
+            let mut current = link;
+            loop {
+                if current.is_some() {
+                    stack.push((*current.unwrap().as_ptr()).key.clone());
+                    current = &(*current.unwrap().as_ptr()).parent;
+                } else {
+                    break;
+                }
+            }
+        }
+        print!("Tracing parentage: ");
+        for i in 0..(stack.len() - 1) {
+            print!("{} > ", &stack[i]);
+        }
+        print!("{}\n", stack[stack.len() - 1])
+    }
+
+    /// removes the passed link from the tree, replacing its position with the
+    /// child denoted by the branch parameter.
+    /// returns the removed link with parent, left and right pointers cleared
+    /// only works with links with a single child.
+    /// method will panic if link contains more than 1 child
+    fn replace_with_child(&mut self, link: &mut Link<K, V>, which_child: Branch) -> Link<K, V> {
+        let removed: Link<K, V>;
+        let lost_child: Link<K, V>;
+        unsafe {
+            let node = &mut (*link.unwrap().as_ptr());
+
+            // panic if link has more than 1 child
+            match Node::which_children_exist(&node) {
+                Children::Both => panic!(),
+                _ => {}
+            }
+
+            let parent = &mut node.parent;
+            let parentage = self.find_branch_from_parent(&link);
+            let adopted_child: Link<K, V> = match which_child {
+                Branch::Left => { node.left.take() },
+                Branch::Right => { node.right.take() },
+                _ => panic!(),
+            };
+
+            // pop link out of tree
+            removed = std::mem::replace(link, adopted_child);
+
+            // update child's parent pointer
+            (*link.unwrap().as_ptr()).parent = *parent;
+
+            // clear removed link's inside pointers
+            (*removed.unwrap().as_ptr()).left.take();
+            (*removed.unwrap().as_ptr()).right.take();
+            (*removed.unwrap().as_ptr()).parent.take();
+        }
+        removed
+    }
+
     /// Remove key-value pair from the tree
     pub fn remove(&mut self, key: &K) -> Option<BoxedNode<K, V>> {
         println!("\nCalled remove on {}", &key);
@@ -301,7 +379,7 @@ impl<K, V> AVLTree<K, V>
                         },
 
                         Branch::Left => {
-                            println!("removing parent's left link");
+                            println!("removing parent's left");
                             let parent_node_left = &mut (*parent.unwrap().as_ptr()).left;
                             removed_link = std::mem::replace(parent_node_left, child);
 
@@ -318,7 +396,7 @@ impl<K, V> AVLTree<K, V>
                         },
 
                         Branch::Right => {
-                            println!("removing parent's right link");
+                            println!("removing parent's right");
                             let parent_node_right = &mut (*parent.unwrap().as_ptr()).right;
                             removed_link = std::mem::replace(parent_node_right, child);
 
@@ -345,7 +423,7 @@ impl<K, V> AVLTree<K, V>
                 // Successor's parent inherits successor's right child
                 // Successor has no left child to give away
                 Children::Both => {
-                    println!("removed node has both children");
+                    println!("removed has both children");
 
                     // mutable refs to link and associated node returned from successor identification
                     // these become stale when successor is moved out of tree
@@ -354,9 +432,9 @@ impl<K, V> AVLTree<K, V>
 
                     // temporary variables for holding various links in between disconnection and attachment
                     let mut successor: Link<K, V>;
-                    let mut removed_node_left: Link<K, V>;
+                    let mut removed_left: Link<K, V>;
 
-                    print!("successor node: ");
+                    print!("SUCCESSOR: ");
                     debug_link(successor_link);
 
                     let successor_key = get_key(successor_link).unwrap();
@@ -369,12 +447,12 @@ impl<K, V> AVLTree<K, V>
                     if successor_key != removed_node_right_key {
                         println!("successor node is not removed node's right child");
 
-                        removed_node_left = (*removed_node_ptr).left.take();
-                        print!("removed node's left: ");
-                        debug_link(&removed_node_left);
+                        removed_left = (*removed_node_ptr).left.take();
+                        print!("removed's left: ");
+                        debug_link(&removed_left);
 
                         let removed_node_right = &mut (*removed_node_ptr).right;
-                        print!("removed node's right: ");
+                        print!("removed's right: ");
                         debug_link(removed_node_right);
 
                         let successor_old_parent = &mut successor_node.parent;
@@ -386,21 +464,40 @@ impl<K, V> AVLTree<K, V>
                         print!("successor's old parent's left: ");
                         debug_link(successor_old_parent_left);
 
-                        println!("Moving successor out of the tree temporarily.");
-                        // replace successor's old parent's left child with the successor node's right
-                        successor = std::mem::replace(successor_old_parent_left, successor_node.right);
+                        let successor_node_right: Link<K, V> = successor_node.right.take();
+                        print!("successor's right: ");
+                        debug_link(&successor_node_right);
 
-                        print!("successor post-moveout: ");
+                        // replace successor's old parent's left child with the successor node's right
+                        println!("Moving successor out of the tree temporarily.");
+                        successor = std::mem::replace(successor_link, successor_node_right);
+                        println!("----------------POPPED SUCCESSOR OUT---------------------");
+
+                        print!("successor's right: ");
+                        debug_link(&successor_node_right);
+                        print!("successor_link: ");
+                        debug_link(successor_link);
+                        print!("SUCCESSOR: ");
                         debug_link(&successor);
 
+                        println!("------updating successor's old right child's parent pointer------");
+                        let successor_old_parent_left = &mut (*successor_old_parent.unwrap().as_ptr()).left;
+                        let mut successor_old_parent_left_parent = &mut (*successor_old_parent_left.unwrap().as_ptr()).parent;
+                        *successor_old_parent_left_parent = *successor_old_parent_left;
+
+                        let successor_old_parent = &mut successor_node.parent;
+                        print!("successor's old parent: ");
+                        debug_link(successor_old_parent);
                         print!("successor's old parent's left post-replace: ");
                         debug_link(successor_old_parent_left);
+                        print!("successor's old right post-replace: ");
+                        debug_link(&successor_node_right);
 
-                        // update successor's right child and the right child's parent reference
-                        println!("Updating successor node's right child to removed node's right child");
+                        // set successor's new right child and the update that right child's parent reference
+                        println!("-----Updating successor node's right child to removed node's right child-----");
                         let successor_node = &mut (*successor.unwrap().as_ptr());
                         successor_node.right = *removed_node_right;
-                        println!("Updating new right child's parent reference.");
+                        println!("---------Updating new right child's parent reference.--------");
                         (*successor_node.right.unwrap().as_ptr()).parent = successor;
 
                         print!("successor post-right-child-swap: ");
@@ -413,9 +510,9 @@ impl<K, V> AVLTree<K, V>
                         println!("successor node is removed node's right child");
 
                         println!("popping removed node's left child into temporary variable");
-                        removed_node_left = (*removed_node_ptr).left.take();
+                        removed_left = (*removed_node_ptr).left.take();
                         print!("removed node's left: ");
-                        debug_link(&removed_node_left);
+                        debug_link(&removed_left);
 
                         let removed_node_right = &mut (*removed_node_ptr).right;
                         print!("removed node's right: ");
@@ -431,7 +528,7 @@ impl<K, V> AVLTree<K, V>
 
                     // update successor references and new successor's children's parent references
                     println!("connecting successor to removed node's left link");
-                    successor_node.left = removed_node_left;
+                    successor_node.left = removed_left;
                     (*successor_node.left.unwrap().as_ptr()).parent = successor;
 
                     println!("replacing removed node with successor");
@@ -509,6 +606,19 @@ impl<K, V> AVLTree<K, V>
             }
         }
         lines
+    }
+}
+
+impl<K, V> Drop for AVLTree<K, V>
+    where K: Display + Debug + PartialOrd + Clone + ToString {
+    fn drop(&mut self) {
+        unsafe {
+            while let Some(link) = self.root {
+                let key = (*link.as_ptr()).key.clone();
+                self.remove(&key);
+                self.display();
+            }
+        }
     }
 }
 
@@ -743,7 +853,6 @@ pub enum Children {
     Both,
 }
 
-
 fn print_type_of<T>(_: &T) {
     println!("{}", std::any::type_name::<T>())
 }
@@ -865,7 +974,8 @@ mod tests {
     //     println!("\nTesting min under and max under...");
     //     let mut avl_tree: AVLTree<f32, Option<Vec<&str>>> = AVLTree::new();
     //     let mut rng = rand::thread_rng();
-    //     let keys: Vec<f32> = (0..15).map(|_| rng.gen_range(0..10000) as f32 / 100.0).collect();
+    //     // let keys: Vec<f32> = (0..15).map(|_| rng.gen_range(0..10000) as f32 / 100.0).collect();
+    //     let keys = vec![53.81, 76.76, 47.0, 20.32, 50.99, 20.02, 55.38, 85.96, 42.97, 30.12, 64.04, 71.08, 62.07, 32.62, 11.2];
     //     println!("Filling tree with {:?}", keys);
     //     for key in &keys {
     //         avl_tree.insert(key.clone(), None);
@@ -883,7 +993,7 @@ mod tests {
     //             let link_prev = max_under_left(&mut link);
     //             let link_prev_key = &(*link_prev.unwrap().as_ptr()).key;
     //
-    //             let parent_key_str = get_parent_key_as_str(link);
+    //             let parent_key_str = get_key_as_str(parent);
     //
     //             println!("keys before and after {}: ({}, {})", &key, &link_prev_key, &link_next_key);
     //             println!("parent for {} is {}", &key, &parent_key_str);
@@ -897,8 +1007,8 @@ mod tests {
         println!("\nTesting node removals...");
         let mut avl_tree: AVLTree<f32, Option<&str>> = AVLTree::new();
         let mut rng = rand::thread_rng();
-        // let mut keys: Vec<f32> = (0..15).map(|_| rng.gen_range(0..10000) as f32 / 100.0).collect();
-        let mut keys: Vec<f32> = vec![86.66, 22.36, 87.51, 62.35, 62.94, 11.67, 22.72, 10.06, 7.27, 18.1, 16.91, 2.96, 83.62, 17.97, 70.78];
+        let mut keys: Vec<f32> = (0..5).map(|_| rng.gen_range(0..10000) as f32 / 100.0).collect();
+        // let mut keys: Vec<f32> = vec![86.66, 22.36, 87.51, 62.35, 62.94, 11.67, 22.72, 10.06, 7.27, 18.1, 16.91, 2.96, 83.62, 17.97, 70.78];
         println!("Filling tree with {:?}", keys);
         for key in &keys {
             avl_tree.insert(key.clone(), None);
@@ -933,8 +1043,8 @@ mod tests {
         }
 
         // shuffle keys and insert nodes again
-        // keys.shuffle(&mut rng);
-        let keys = vec![83.62, 11.67, 17.97, 62.94, 7.27, 10.06, 86.66, 22.36, 22.72, 2.96, 18.1, 70.78, 87.51, 62.35, 16.91];
+        keys.shuffle(&mut rng);
+        // let keys = vec![83.62, 11.67, 17.97, 62.94, 7.27, 10.06, 86.66, 22.36, 22.72, 2.96, 18.1, 70.78, 87.51, 62.35, 16.91];
         println!("keys shuffled, inserting again: {:?}", keys);
         for key in &keys {
             avl_tree.insert(key.clone(), None);
@@ -942,14 +1052,11 @@ mod tests {
         assert_eq!(avl_tree.len, keys.len());
         avl_tree.display();
         println!("\nremoving again");
-        // let keys = vec![62.94];
         for key in &keys {
             avl_tree.remove(&key);
             avl_tree.display();
         }
         // assert_eq!(avl_tree.len, 0);
         // avl_tree.display();
-
-
     }
 }
