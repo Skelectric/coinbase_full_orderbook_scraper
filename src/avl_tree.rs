@@ -4,41 +4,48 @@
 #![allow(unused_imports)]
 // #![allow(unused_assignments)]
 
+// standard library
 use std::fmt::{Debug, Display};
 use std::iter::zip;
 use std::cmp::{max, Ordering};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::string::ToString;
+use std::ops::Index;
+// homebrew
+use crate::orderbook::*;
 
-type NodePtr<K, V> = NonNull<Node<K, V>>;
-type Link<K, V> = Option<NodePtr<K, V>>;
-type LinkPtr<K, V> = NonNull<Link<K, V>>;
-type BoxedNode<K, V> = Box<Node<K, V>>;
+pub trait Remove { fn remove(&mut self, index: usize) -> Self; }
+pub trait New { fn new() -> Self; }
+
+type NodePtr<K> = NonNull<Node<K>>;
+type Link<K> = Option<NodePtr<K>>;
+type LinkPtr<K> = NonNull<Link<K>>;
+type BoxedNode<K> = Box<Node<K>>;
 
 /// AVL tree struct with a reference to the root and a node count
-pub struct AVLTree<K, V>
-    where K: Display + Debug + PartialOrd + Clone + ToString {
-    root: Link<K, V>,
+pub struct AVLTree<K>
+    where K: Display + Debug + PartialOrd + Clone + ToString, {
+    root: Link<K>,
     len: usize,
     _boo: PhantomData<K>,
-    _none: Option<NodePtr<K, V>>, // used for find_link_mut - should always be None
+    _none: Option<NodePtr<K>>, // used for find_link_mut - should always be None
 }
 
 /// Node struct that stores key-value pairs and child references
-#[derive(PartialEq)]
-pub struct Node<K, V>
+// #[derive(PartialEq)]
+pub struct Node<K>
     where K: Display + Debug + PartialOrd + Clone {
     pub key: K,
-    pub value: V,
-    pub parent: Link<K, V>,
-    pub left: Link<K, V>,
-    pub right: Link<K, V>,
+    pub value: OrderStack,
+    pub parent: Link<K>,
+    pub left: Link<K>,
+    pub right: Link<K>,
 }
 
-pub struct Iter<'a, K, V>
+pub struct Iter<'a, K>
     where K: Display + Debug + PartialOrd + Clone {
-    current_link: Link<K, V>,
+    current_link: Link<K>,
     first_move: bool,
     len: usize,
     _boo: PhantomData<&'a K>,
@@ -52,27 +59,32 @@ pub enum LinkRotation {
     RLCase,
 }
 
-pub enum LinkLocation<K, V>
+pub enum LinkLocation<K>
     where K: Display + Debug + Clone + PartialOrd {
     None {
-        parent: Link<K, V>,
-        link_ptr: LinkPtr<K, V>,
+        parent: Link<K>,
+        link_ptr: LinkPtr<K>,
     },
     Some {
-        parent: Link<K, V>,
-        link_ptr: LinkPtr<K, V>,
+        parent: Link<K>,
+        link_ptr: LinkPtr<K>,
     }
 }
 
-impl<K, V> AVLTree<K, V>
+impl<K> AVLTree<K>
     where K: Display + Debug + PartialOrd + Clone + ToString {
     /// Create new AVL Tree
     pub fn new() -> Self {
         AVLTree { root: None, len: 0, _boo: PhantomData, _none: None}
     }
 
+    /// Return number of nodes in tree
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     /// Get reference to key's value
-    pub fn get(&self, key: &K) -> Option<&V> {
+    pub fn get(&self, key: &K) -> Option<&OrderStack> {
         let link = self.find_link(&key);
         unsafe {
             Some(&(*((*link)?.as_ptr())).value)
@@ -80,7 +92,7 @@ impl<K, V> AVLTree<K, V>
     }
 
     /// Get mutable reference to key's value
-    pub fn get_mut(&self, key: &K) -> Option<&mut V> {
+    pub fn get_mut(&self, key: &K) -> Option<&mut OrderStack> {
         let link = self.find_link(&key);
         unsafe {
             Some(&mut (*((*link)?.as_ptr())).value)
@@ -104,8 +116,8 @@ impl<K, V> AVLTree<K, V>
     }
 
     /// Get immutable reference to a link associated with the passed key
-    fn find_link(&self, key: &K) -> &Link<K, V> {
-        let mut current: &Link<K, V> = &self.root;
+    fn find_link(&self, key: &K) -> &Link<K> {
+        let mut current: &Link<K> = &self.root;
         unsafe {
             while let Some(node_ptr) = current.as_ref() {
                 let node = &(*node_ptr.as_ptr());
@@ -128,9 +140,9 @@ impl<K, V> AVLTree<K, V>
 
     /// Get mutable location of where a key would exist in the tree,
     /// regardless of whether it exists.
-    fn find_link_location(&mut self, key: &K) -> LinkLocation<K, V> {
-        let mut parent: Link<K, V>;
-        let mut current: LinkPtr<K, V>;
+    fn find_link_location(&mut self, key: &K) -> LinkLocation<K> {
+        let mut parent: Link<K>;
+        let mut current: LinkPtr<K>;
         let mut found: bool = false;
         unsafe {
             parent = None;
@@ -163,15 +175,26 @@ impl<K, V> AVLTree<K, V>
 
 
     /// Insert key-value pair
-    fn insert(&mut self, key: K, value: V) {
+    pub fn insert(&mut self, key: K, order: Option<Order>) {
         let location = self.find_link_location(&key);
+
+        let order = {
+            if order.is_none() { Default::default() }
+            else { order.unwrap() }
+        };
 
         match location {
             LinkLocation::None { mut parent, link_ptr } => {
                 unsafe {
                     // println!("\nInserting {}\n", &key);
                     let link = &mut *link_ptr.as_ptr();
-                    let mut new_link: Link<K, V> = Some(Node::new(key, value, parent));
+
+                    let mut new_link: Link<K> = {
+                        let mut order_list = OrderStack::new();
+                        order_list.push_back(order);
+                        Some(Node::new(key, order_list, parent))
+                    };
+
                     std::mem::swap(link, &mut new_link);
                     // self.display();
                     self.balance_stack(&mut parent);
@@ -179,14 +202,18 @@ impl<K, V> AVLTree<K, V>
                 }
             },
             LinkLocation::Some {parent, link_ptr} => {
-                // todo: add logic to append value to collection
                 // println!("Key {} already exists", &key);
+                unsafe {
+                    let node = &mut (*(*link_ptr.as_ptr()).unwrap().as_ptr());
+                    node.value.push_back(order);
+                }
             }
         }
     }
 
     /// Iteratively balances the tree starting from the passed link down to the root
-    unsafe fn balance_stack(&mut self, link: &mut Link<K, V>) {
+    unsafe fn balance_stack(&mut self, link: &mut Link<K>) {
+        // println!("balancing_stack from {} down to root. ", Self::debug_link(link));
         let mut current = link;
         while current.is_some() {
             self.balance(current);
@@ -201,7 +228,7 @@ impl<K, V> AVLTree<K, V>
     }
 
     /// return true if link is root
-    fn is_root(link: &Link<K, V>) -> bool {
+    fn is_root(link: &Link<K>) -> bool {
         let node = unsafe { &(*link.unwrap().as_ptr()) };
         if node.parent.is_none() { true } else { false }
     }
@@ -210,7 +237,7 @@ impl<K, V> AVLTree<K, V>
     ///
     /// method will assume empty links are root, so be sure not to pass non-root empty links
     /// to this method
-    fn get_parentage(link: &Link<K, V>) -> Branch {
+    fn get_parentage(link: &Link<K>) -> Branch {
         match link {
             None => Branch::Root,
             Some(node_ptr) => {
@@ -221,7 +248,7 @@ impl<K, V> AVLTree<K, V>
     }
 
     /// Get link's distance from root
-    pub fn distance(link: &Link<K, V>) -> isize {
+    pub fn distance(link: &Link<K>) -> isize {
         let mut distance: isize = 0;
         let mut current = link;
         unsafe {
@@ -234,7 +261,7 @@ impl<K, V> AVLTree<K, V>
     }
 
     /// Get link's height
-    pub fn height(link: &Link<K, V>) -> isize {
+    pub fn height(link: &Link<K>) -> isize {
         if link.is_none() {return 0};
         let mut right_height: isize = 0;
         let mut left_height: isize = 0;
@@ -256,7 +283,7 @@ impl<K, V> AVLTree<K, V>
 
     /// Get link's balance factor by subtracting the link's right child
     /// height from its left child height
-    fn balance_factor(link: &Link<K, V>) -> isize {
+    fn balance_factor(link: &Link<K>) -> isize {
         let node = unsafe { &(*link.unwrap().as_ptr()) };
         let right_height = Self::height(&node.right);
         let left_height = Self::height(&node.left);
@@ -266,12 +293,12 @@ impl<K, V> AVLTree<K, V>
     /// Calls the link's applicable rotation method, dependent on its balance factor.
     ///
     /// After balancing, calls balance on the link's parent.
-    fn balance(&mut self, link: &mut Link<K, V>) {
+    fn balance(&mut self, link: &mut Link<K>) {
         if link.is_some() {
             let balance_factor = Self::balance_factor(link);
             let node = unsafe { &mut (*link.unwrap().as_ptr()) };
 
-            // print!("Checking balance of {}...", Self::debug_link(link));
+            // println!("Checking balance of {}...", Self::debug_link(link));
             if balance_factor > 1 {
                 // println!();
                 let balance_factor_right = Self::balance_factor(&node.right);
@@ -306,7 +333,7 @@ impl<K, V> AVLTree<K, V>
     /// Reference:
     ///
     /// https://en.wikipedia.org/wiki/File:Tree_Rebalancing.gif"""
-    unsafe fn rotate(&mut self, root: &mut Link<K, V>, case: LinkRotation) -> LinkPtr<K, V>{
+    unsafe fn rotate(&mut self, root: &mut Link<K>, case: LinkRotation) -> LinkPtr<K>{
         match case {
             LinkRotation::RRCase | LinkRotation::LLCase => {
 
@@ -332,10 +359,10 @@ impl<K, V> AVLTree<K, V>
                     // println!("Root's branch = {:?}", branch);
 
                     // need pointers that persist through rotations
-                    let parent_ptr = parent as *mut Link<K, V>;
-                    let root_ptr = root as *mut Link<K, V>;
-                    let pivot_ptr = pivot as *mut Link<K, V>;
-                    let pivot_left_ptr = pivot_left as *mut Link<K, V>;
+                    let parent_ptr = parent as *mut Link<K>;
+                    let root_ptr = root as *mut Link<K>;
+                    let pivot_ptr = pivot as *mut Link<K>;
+                    let pivot_left_ptr = pivot_left as *mut Link<K>;
 
                     // println!("parent_ptr: {}\t\tparent: {}", Self::debug_link(&*parent_ptr), Self::debug_link(&parent));
                     // println!("root_ptr: {}\troot: {}", Self::debug_link(&*root_ptr), Self::debug_link(root));
@@ -343,23 +370,23 @@ impl<K, V> AVLTree<K, V>
                     // println!("pivot_left_ptr: {}\t\tpivot_left: {}", Self::debug_link(&*pivot_left_ptr), Self::debug_link(pivot_left));
 
                     // separate root from parent
-                    let mut root: Link<K, V> = match branch {
+                    let mut root: Link<K> = match branch {
                         Branch::Root => { self.root.take() },
                         Branch::Left => { (*parent.unwrap().as_ptr()).left.take() },
                         Branch::Right => { (*parent.unwrap().as_ptr()).right.take() },
                     };
                     // update root_ptr to maintain reference to root (now separated)
-                    let root_ptr = &mut root as *mut Link<K, V>;
+                    let root_ptr = &mut root as *mut Link<K>;
 
                     // separate pivot from root
-                    let mut pivot: Link<K, V> = (*root.unwrap().as_ptr()).right.take();
+                    let mut pivot: Link<K> = (*root.unwrap().as_ptr()).right.take();
                     // update pivot_ptr to maintain reference to pivot (now separated)
-                    let pivot_ptr = &mut pivot as *mut Link<K, V>;
+                    let pivot_ptr = &mut pivot as *mut Link<K>;
 
                     // separate pivot's child from pivot
-                    let mut pivot_left: Link<K, V> = (*pivot.unwrap().as_ptr()).left.take();
+                    let mut pivot_left: Link<K> = (*pivot.unwrap().as_ptr()).left.take();
                     // update pivot_left_ptr to maintain reference to pivot_left (now separated)
-                    let pivot_left_ptr = &mut pivot_left as *mut Link<K, V>;
+                    let pivot_left_ptr = &mut pivot_left as *mut Link<K>;
 
                     // update parent's child reference to pivot
                     match branch {
@@ -401,6 +428,11 @@ impl<K, V> AVLTree<K, V>
 
                     // self.display();
 
+                    drop(parent_ptr);
+                    drop(root_ptr);
+                    drop(pivot_ptr);
+                    drop(pivot_left_ptr);
+
                     NonNull::new_unchecked(parent_ptr)
 
                 } else {  // LinkRotation::LLCase
@@ -416,10 +448,10 @@ impl<K, V> AVLTree<K, V>
                     // println!("Root's branch = {:?}", branch);
 
                     // need pointers that persist through rotations
-                    let parent_ptr = parent as *mut Link<K, V>;
-                    let root_ptr = root as *mut Link<K, V>;
-                    let pivot_ptr = pivot as *mut Link<K, V>;
-                    let pivot_right_ptr = pivot_right as *mut Link<K, V>;
+                    let parent_ptr = parent as *mut Link<K>;
+                    let root_ptr = root as *mut Link<K>;
+                    let pivot_ptr = pivot as *mut Link<K>;
+                    let pivot_right_ptr = pivot_right as *mut Link<K>;
 
                     // println!("parent_ptr: {}\t\tparent: {}", Self::debug_link(&*parent_ptr), Self::debug_link(&parent));
                     // println!("root_ptr: {}\troot: {}", Self::debug_link(&*root_ptr), Self::debug_link(root));
@@ -427,23 +459,23 @@ impl<K, V> AVLTree<K, V>
                     // println!("pivot_right_ptr: {}\t\tpivot_right: {}", Self::debug_link(&*pivot_right_ptr), Self::debug_link(pivot_right));
 
                     // separate root from parent
-                    let mut root: Link<K, V> = match branch {
+                    let mut root: Link<K> = match branch {
                         Branch::Root => { self.root.take() },
                         Branch::Left => { (*parent.unwrap().as_ptr()).left.take() },
                         Branch::Right => { (*parent.unwrap().as_ptr()).right.take() },
                     };
                     // update root_ptr to maintain reference to root (now separated)
-                    let root_ptr = &mut root as *mut Link<K, V>;
+                    let root_ptr = &mut root as *mut Link<K>;
 
                     // separate pivot from root
-                    let mut pivot: Link<K, V> = (*root.unwrap().as_ptr()).left.take();
+                    let mut pivot: Link<K> = (*root.unwrap().as_ptr()).left.take();
                     // update pivot_ptr to maintain reference to pivot (now separated)
-                    let pivot_ptr = &mut pivot as *mut Link<K, V>;
+                    let pivot_ptr = &mut pivot as *mut Link<K>;
 
                     // separate pivot's child from pivot
-                    let mut pivot_right: Link<K, V> = (*pivot.unwrap().as_ptr()).right.take();
+                    let mut pivot_right: Link<K> = (*pivot.unwrap().as_ptr()).right.take();
                     // update pivot_right_ptr to maintain reference to pivot_right (now separated)
-                    let pivot_right_ptr = &mut pivot_right as *mut Link<K, V>;
+                    let pivot_right_ptr = &mut pivot_right as *mut Link<K>;
 
                     // update parent's child reference to pivot
                     match branch {
@@ -485,6 +517,11 @@ impl<K, V> AVLTree<K, V>
 
                     // self.display();
 
+                    drop(parent_ptr);
+                    drop(root_ptr);
+                    drop(pivot_ptr);
+                    drop(pivot_right_ptr);
+
                     NonNull::new_unchecked(parent_ptr)
                 }
             },
@@ -492,7 +529,7 @@ impl<K, V> AVLTree<K, V>
             LinkRotation::RLCase | LinkRotation::LRCase => {
 
                 // Double Rotations
-                let pivot: &mut Link<K, V>;
+                let pivot: &mut Link<K>;
                 if case == LinkRotation::RLCase {
                     // println!("\nStart RL Case - consists of LL -> RR\n");
 
@@ -579,58 +616,32 @@ impl<K, V> AVLTree<K, V>
     /// If the link passed to the method is empty, method will assume that it's the root node,
     /// which doesn't have a parent. Hence, need to take care not to call this method on
     /// empty links that are not the root node.
-    fn flip_link(&mut self, link: &mut Link<K, V>) -> LinkPtr<K, V> {
-        let link_ptr: LinkPtr<K, V>;
+    fn flip_link(&mut self, link: &mut Link<K>) -> LinkPtr<K> {
+        let link_ptr: LinkPtr<K>;
         let parent_branch = Self::get_parentage(&link);
         unsafe {
             match parent_branch {
                 Branch::Root => {
-                    link_ptr = NonNull::new_unchecked(&mut self.root as *mut Link<K, V>);
+                    link_ptr = NonNull::new_unchecked(&mut self.root as *mut Link<K>);
                 },
                 Branch::Left => {
                     let node = &mut (*link.unwrap().as_ptr());
                     let parent_node = &mut (*node.parent.unwrap().as_ptr());
-                    link_ptr = NonNull::new_unchecked(&mut parent_node.left as *mut Link<K, V>);
+                    link_ptr = NonNull::new_unchecked(&mut parent_node.left as *mut Link<K>);
                 },
                 Branch::Right => {
                     let node = &mut (*link.unwrap().as_ptr());
                     let parent_node = &mut (*node.parent.unwrap().as_ptr());
-                    link_ptr = NonNull::new_unchecked(&mut parent_node.right as *mut Link<K, V>);
+                    link_ptr = NonNull::new_unchecked(&mut parent_node.right as *mut Link<K>);
                 },
             }
         }
         link_ptr
     }
 
-    /// flip link to a node from a child-parent reference to being a parent-child reference.
-    /// Needs to be a static method to work around borrow checker in remove method.
-    /// Hence, output needs to be wrapped in logic that accounts for None returns, which
-    /// can either mean that flipped link is root, or that the passed link was empty.
-    fn flip_link_static(link: &mut Link<K, V>) -> Option<&mut Link<K, V>> {
-        let new_link: Option<&mut Link<K, V>>;
-        if link.is_some() {
-            let parent_branch = Self::get_parentage(&link);
-            unsafe {
-                let node = &mut (*link.unwrap().as_ptr());
-                match parent_branch {
-                    Branch::Root => new_link = None,
-                    Branch::Left => {
-                        let parent_node = &mut (*node.parent.unwrap().as_ptr());
-                        new_link = Some(&mut parent_node.left);
-                    },
-                    Branch::Right => {
-                        let parent_node = &mut (*node.parent.unwrap().as_ptr());
-                        new_link = Some(&mut parent_node.right);
-                    },
-                }
-            }
-        } else {new_link = None}
-        new_link
-    }
-
     /// return stack of link references from passed link to root. primarily for debugging
-    fn trace_parentage(link: &Link<K, V>) -> Vec<&Link<K, V>>{
-        let mut stack: Vec<&Link<K, V>> = Vec::new();
+    fn trace_parentage(link: &Link<K>) -> Vec<&Link<K>>{
+        let mut stack: Vec<&Link<K>> = Vec::new();
         let mut current = link;
         loop {
             if current.is_some() {
@@ -648,8 +659,8 @@ impl<K, V> AVLTree<K, V>
     /// returns the removed link with parent, left and right pointers cleared
     /// only works with links with a single child.
     /// method will panic if link contains more than 1 child
-    fn replace_with_child(&mut self, link: &mut Link<K, V>, which_child: Branch) -> Link<K, V> {
-        let removed: Link<K, V>;
+    fn replace_with_child(&mut self, link: &mut Link<K>, which_child: Branch) -> Link<K> {
+        let removed: Link<K>;
         unsafe {
             let node = &mut (*link.unwrap().as_ptr());
 
@@ -660,9 +671,9 @@ impl<K, V> AVLTree<K, V>
             }
 
             let parent_branch = Self::get_parentage(&link);
-            let parent: Link<K, V> = (*link.unwrap().as_ptr()).parent.take();
+            let parent: &mut Link<K> = &mut (*link.unwrap().as_ptr()).parent;
 
-            let adopted_child: Link<K, V> = match which_child {
+            let adopted_child: Link<K> = match which_child {
                 Branch::Left => { node.left.take() },
                 Branch::Right => { node.right.take() },
                 _ => panic!(),
@@ -680,42 +691,28 @@ impl<K, V> AVLTree<K, V>
 
             // update child's parent pointer if it's not None
             if link.is_some() {
-                // // println!("updating child's parent pointer");
-                // (*link.unwrap().as_ptr()).parent = *parent;
                 match parent_branch {
                     Branch::Root => { (*link.unwrap().as_ptr()).parent = None },
-                    _ => { (*link.unwrap().as_ptr()).parent = parent }
+                    _ => { (*link.unwrap().as_ptr()).parent = *parent }
                 }
             }
 
             // debugging
             // println!("removed_link's old location: {}", Self::debug_link(link));
-            // println!("removed link before clearing pointers: {}", Self::debug_link(&removed));
+            // println!("removed link: {}", Self::debug_link(&removed));
             // println!("parent: {}", Self::debug_link(&parent));
-            //
-            // println!("--clearing removed node's pointers--");
-            // clear removed link's inside pointers
-            (*removed.unwrap().as_ptr()).left.take();
-            (*removed.unwrap().as_ptr()).right.take();
-            (*removed.unwrap().as_ptr()).parent.take();
-
-            // debugging
-            // println!("parent after clearing pointers: {}", Self::debug_link(&parent));
-            // println!("child after clearing pointers: {}", Self::debug_link(link));
-            // println!("removed link after clearing pointers: {}", Self::debug_link(&removed));
-            //
             // println!("___________________________");
         }
         removed
     }
 
     /// Remove key-value pair from the tree
-    pub fn remove(&mut self, key: &K) -> Option<BoxedNode<K, V>> {
+    pub fn remove(&mut self, key: &K) -> Option<BoxedNode<K>> {
         // println!("\nCalled remove on {}", &key);
-        //self.debug_find_link(&key);
+
         let insert_position = self.find_link_location(&key);
         let link_for_removal;
-        let mut parent: Link<K, V>;
+        let mut parent: Link<K>;
         let branch;
 
         match insert_position {
@@ -730,15 +727,14 @@ impl<K, V> AVLTree<K, V>
         }
 
         // to store final removed node
-        let removed_node: BoxedNode<K, V>;
+        let removed_node: BoxedNode<K>;
 
-        let removed_link: Link<K, V>;
+        let removed_link: Link<K>;
         unsafe {
-            let adopted_children = Node::which_children_exist(&(*(*link_for_removal)?.as_ptr()));
 
-            let removed_node_ptr = (*link_for_removal)?.as_ptr();
+            let mut successor_old_parent: &mut Link<K> = &mut None;
 
-            match adopted_children {
+            match Node::which_children_exist(&(*link_for_removal.unwrap().as_ptr())) {
                 Children::None => {
                     removed_link = link_for_removal.take();
                 },
@@ -759,81 +755,82 @@ impl<K, V> AVLTree<K, V>
                 // Successor has no left child to give away
                 Children::Both => {
 
-                    // mutable refs to link and associated node returned from successor identification
-                    // these become stale when successor is moved out of tree
-                    let successor_link = Self::min_under_right(link_for_removal);
+                    // need a raw pointer to work around borrow checker
+                    let removed_node_ptr = (*link_for_removal)?.as_ptr();
 
-                    // temporary variables for holding various links in between disconnection and attachment
-                    let successor: Link<K, V>;
-                    let removed_left: Link<K, V>;
+                    // mutable ref to successor
+                    let successor = Self::min_under_right(link_for_removal);
 
-                    let successor_key = Self::get_key(successor_link).unwrap();
-                    let removed_node_right_key = Self::get_key(&(*removed_node_ptr).right).unwrap();
+                    // temporary spot to hold successor in upcoming detachment / reattachment
+                    let successor_temp: Link<K>;
 
                     // determine whether the successor's parent will adopt the successor's right child
                     // if successor is the removed node's right, it will remain in control of its right child
                     // otherwise, if the successor is somewhere further down the right subtree, it's right child
                     // will become the successor's parent's left child
+                    let successor_key = Self::get_key(successor).unwrap();
+                    let removed_node_right_key = Self::get_key(&(*removed_node_ptr).right).unwrap();
                     if successor_key != removed_node_right_key {
                         let removed_node_right = &mut (*removed_node_ptr).right;
 
                         // replace successor's old parent's left child with the successor node's right
-                        successor = self.replace_with_child(successor_link, Branch::Right);
+                        successor_temp = self.replace_with_child(successor, Branch::Right);
 
+                        // alias successor's node for readability and
                         // set successor's new right child and update the right child's parent reference
-                        let successor_node = &mut (*successor.unwrap().as_ptr());
-                        successor_node.right = *removed_node_right;
-                        (*successor_node.right.unwrap().as_ptr()).parent = successor;
+                        let successor_node = &mut (*successor_temp.unwrap().as_ptr());
+                        (*successor_temp.unwrap().as_ptr()).right = *removed_node_right;
+                        (*(*successor_temp.unwrap().as_ptr()).right.unwrap().as_ptr()).parent = successor_temp;
 
                     } else {
                         let removed_node_right = &mut (*removed_node_ptr).right;
-                        successor = removed_node_right.take();
+                        successor_temp = removed_node_right.take();
                     }
 
-                    // alias successor's node again
-                    let successor_node = &mut (*successor.unwrap().as_ptr());
+                    // alias successor's node for readability
+                    let successor_node = &mut (*successor_temp.unwrap().as_ptr());
+                    // store mutable reference to successor's old parent for balancing starting point later
+                    successor_old_parent = &mut (*self.flip_link(&mut successor_node.parent).as_ptr());
 
-                    // update successor references and new successor's children's parent references
-                    removed_left = (*removed_node_ptr).left.take();
+                    // give the successor the removed link's left child and update its parent reference
+                    successor_node.left = (*removed_node_ptr).left.take();
+                    (*successor_node.left.unwrap().as_ptr()).parent = successor_temp;
 
-                    successor_node.left = removed_left;
-                    (*successor_node.left.unwrap().as_ptr()).parent = successor;
+                    drop(removed_node_ptr);
 
-                    match branch {  // Parent inherits successor
+                    // Replace removed link with the successor and update the successor's parent link
+                    match branch {
 
                         Branch::Root => {
-                            removed_link = std::mem::replace(&mut self.root, successor);
-
-                            // remove successor's parent to signify that the parent is root
-                            let successor = &mut self.root;
-                            (*successor.unwrap().as_ptr()).parent.take();
+                            removed_link = std::mem::replace(&mut self.root, successor_temp);
+                            (*self.root.unwrap().as_ptr()).parent.take();
                         },
 
                         Branch::Left => {
                             let parent_node_left = &mut (*parent.unwrap().as_ptr()).left;
-                            removed_link = std::mem::replace(parent_node_left, successor);
-
-                            // update successor's parent
-                            let successor = &mut (*parent.unwrap().as_ptr()).left;
-                            let successor_parent = &mut (*successor.unwrap().as_ptr()).parent;
-                            *successor_parent = parent;
+                            removed_link = std::mem::replace(parent_node_left, successor_temp);
+                            successor_node.parent = parent;
                         },
 
                         Branch::Right => {
                             let parent_node_right = &mut (*parent.unwrap().as_ptr()).right;
-                            removed_link = std::mem::replace(parent_node_right, successor);
-
-                            // update successor's parent
-                            let successor = &mut (*parent.unwrap().as_ptr()).right;
-                            let successor_parent = &mut (*successor.unwrap().as_ptr()).parent;
-                            *successor_parent = parent;
+                            removed_link = std::mem::replace(parent_node_right, successor_temp);
+                            successor_node.parent = parent;
                         },
                     }
                 }
             }
             removed_node = Box::from_raw(removed_link.unwrap().as_ptr());
             // self.display();
-            self.balance_stack(&mut parent);
+
+            // If we just went through Children::Both removal, we need to begin balancing at the
+            // successor's old parent
+            if successor_old_parent.is_some() {
+                self.balance_stack(&mut successor_old_parent);
+            } else {
+                self.balance_stack(&mut parent)
+            }
+
         }
         self.len -= 1;
         Some(removed_node)
@@ -842,7 +839,7 @@ impl<K, V> AVLTree<K, V>
     /// Return non-empty link with the smallest key that's greater than the passed link's key
     /// i.e. take one step right and then step left until the end
     /// Will return the same link that was passed if it has no right child or is empty
-    fn min_under_right(link: &mut Link<K, V>) -> &mut Link<K, V> {
+    fn min_under_right(link: &mut Link<K>) -> &mut Link<K> {
         let mut minimum = link;
         // continue if passed link is non-empty
         if let Some(node) = minimum {
@@ -863,7 +860,7 @@ impl<K, V> AVLTree<K, V>
     /// Return non-empty link with the greatest key that's lesser than the passed link's key
     /// i.e. take one step left and then step right until the end
     /// Will return the same link that was passed if it has no left child or is empty
-    fn max_under_left(link: &mut Link<K, V>) -> &mut Link<K, V> {
+    fn max_under_left(link: &mut Link<K>) -> &mut Link<K> {
         let mut maximum = link;
         // continue if passed link is non-empty
         if let Some(node) = maximum {
@@ -882,14 +879,14 @@ impl<K, V> AVLTree<K, V>
     }
 
     /// Get key from link
-    fn get_key(link: &Link<K, V>) -> Option<K> {
+    fn get_key(link: &Link<K>) -> Option<K> {
         unsafe {
             Some((*(*link)?.as_ptr()).key.clone())
         }
     }
 
     /// Get key as string from link - DEBUGGING
-    fn get_key_as_str(link: &Link<K, V>) -> String {
+    fn get_key_as_str(link: &Link<K>) -> String {
         let key_option = Self::get_key(link);
         match key_option {
             None => "None".to_string(),
@@ -898,7 +895,7 @@ impl<K, V> AVLTree<K, V>
     }
     
     /// Summarizes details about a link into a string
-    fn debug_link(link: &Link<K, V>) -> String {
+    fn debug_link(link: &Link<K>) -> String {
         match link {
             None => format!("EmptyLink"),
             Some(node_ptr) => {
@@ -942,7 +939,7 @@ impl<K, V> AVLTree<K, V>
         lines
     }
 
-    pub fn iter(&self) -> Iter<K, V> {
+    pub fn iter(&self) -> Iter<K> {
         Iter {
             current_link: self.root,
             first_move: true,
@@ -952,10 +949,15 @@ impl<K, V> AVLTree<K, V>
     }
 }
 
+unsafe impl<K> Sync for AVLTree<K>
+    where K: Sync + Display + Debug + PartialOrd + Clone {}
 
-impl<'a, K, V: 'a> Iterator for Iter<'a, K, V>
+unsafe impl<K> Send for AVLTree<K>
+    where K: Send + Display + Debug + PartialOrd + Clone {}
+
+impl<'a, K> Iterator for Iter<'a, K>
     where K: Display + Debug + PartialOrd + Clone {
-    type Item = (&'a K, &'a V);
+    type Item = (&'a K, &'a OrderStack);
 
     /// In-order BST traversal algorithm
     /// 1) For first move only, move down to the left-most link and return
@@ -1034,7 +1036,7 @@ impl<'a, K, V: 'a> Iterator for Iter<'a, K, V>
     }
 }
 
-impl<'a, K, V: 'a> DoubleEndedIterator for Iter <'a, K, V>
+impl<'a, K> DoubleEndedIterator for Iter <'a, K>
     where K: Display + Debug + PartialOrd + Clone {
 
     /// In-order BST traversal algorithm
@@ -1114,7 +1116,7 @@ impl<'a, K, V: 'a> DoubleEndedIterator for Iter <'a, K, V>
     }
 }
 
-impl<K, V> Drop for AVLTree<K, V>
+impl<K> Drop for AVLTree<K>
     where K: Display + Debug + PartialOrd + Clone + ToString {
     fn drop(&mut self) {
         unsafe {
@@ -1127,10 +1129,10 @@ impl<K, V> Drop for AVLTree<K, V>
     }
 }
 
-impl<K, V> Node<K, V>
+impl<K> Node<K>
     where K: Display + Debug + PartialOrd + Clone {
     /// Create new AVL Node
-    fn new(key: K, value: V, parent: Link<K, V>) -> NodePtr<K, V> {
+    fn new(key: K, value: OrderStack, parent: Link<K>) -> NodePtr<K> {
         let boxed_node = Box::new(Node {
             key,
             value,
@@ -1154,7 +1156,7 @@ impl<K, V> Node<K, V>
     }
 
     /// Get the node's key-value pair in a tuple
-    pub fn items(&self) -> (&K, &V) {
+    pub fn items(&self) -> (&K, &OrderStack) {
         (&self.key, &self.value)
     }
 
@@ -1185,14 +1187,14 @@ impl<K, V> Node<K, V>
     }
 
     /// Core display tree function
-    fn display_aux(node: &Node<K, V>) -> (Vec<String>, usize, usize, usize) {
+    fn display_aux(node: &Node<K>) -> (Vec<String>, usize, usize, usize) {
         // print!("display_aux - Node {} > ", &node.key);
         let children = Node::which_children_exist(&node);
         unsafe {
             match children {
                 Children::None => {
                     // println!("no children >");
-                    let line = format!("{:?}", &node.key);
+                    let line = format!("{:?}x{:?}", &node.key, &node.value.cum_order_size().round());
                     let width = line.len();
                     let height = 1;
                     let middle = width / 2;
@@ -1202,7 +1204,7 @@ impl<K, V> Node<K, V>
                     // println!("left child >");
                     let (lines, n, p, x) = Node::display_aux(&(*node.left.unwrap().as_ptr()));
                     // println!("back to {}", &node.key);
-                    let s = format!("{:?}", &node.key);
+                    let s = format!("{:?}x{:?}", &node.key, &node.value.cum_order_size().round());
                     let u = s.len();
                     let first_line = " ".repeat(x + 1) + &"_".repeat(n - x - 1) + &s;
                     let second_line = " ".repeat(x) + &"/" + &" ".repeat(n - x - 1 + u);
@@ -1216,7 +1218,7 @@ impl<K, V> Node<K, V>
                     // println!("right child >");
                     let (lines, n, p, x) = Node::display_aux(&(*node.right.unwrap().as_ptr()));
                     // println!("back to {}", &node.key);
-                    let s = format!("{:?}", &node.key);
+                    let s = format!("{:?}x{:?}", &node.key, &node.value.cum_order_size().round());
                     let u = s.len();
                     let first_line = s + &"_".repeat(x) + &" ".repeat(n - x);
                     let second_line = " ".repeat(u + x) + &r"\" + &" ".repeat(n - x - 1);
@@ -1232,7 +1234,7 @@ impl<K, V> Node<K, V>
                     // println!("now {}'s right >", &node.key);
                     let (mut right, m, q, y) = Node::display_aux(&(*node.right.unwrap().as_ptr()));
                     // println!("back to {}", &node.key);
-                    let s = format!("{:?}", &node.key);
+                    let s = format!("{:?}x{:?}", &node.key, &node.value.cum_order_size().round());
                     let u = s.len();
                     let first_line = " ".repeat(x + 1) + &"_".repeat(n - x - 1) + &s + &"_".repeat(y) + &" ".repeat(m - y);
                     let second_line = " ".repeat(x) + &"/" + &" ".repeat(n - x - 1 + u + y) + &r"\" + &" ".repeat(m - y - 1);
@@ -1342,9 +1344,9 @@ mod tests {
     #[test]
     fn test_balancing() {
         println!("\n-----------TESTING TREE BALANCING-----------\n");
-        let mut avl_tree: AVLTree<i32, Option<&str>> = AVLTree::new();
+        let mut avl_tree: AVLTree<i32> = AVLTree::new();
         let mut rng = rand::thread_rng();
-        // let mut keys: Vec<i32> = vec![23, 65, 29, 60, 99, 88, 84, 25, 65, 22, 75, 64, 9, 64, 1, 57, 1, 79, 29, 37];
+        // let mut keys: Vec<i32> = vec![71, 55, 62, 70, 88, 68, 12, 58, 43, 44, 75, 25, 27, 87, 91, 64, 97, 10, 72, 32];
         let mut keys: Vec<i32> = (0..20).map(|_| rng.gen_range(0..100)).collect();
         // Fill tree
         println!("Filling tree with {:?}", keys);
@@ -1358,7 +1360,7 @@ mod tests {
         assert_eq!(avl_tree.len, expected_tree_length);
 
         let sample: Vec<i32> = keys.iter().map(|&k| k).choose_multiple(&mut rng, 5);
-        // let sample = vec![37, 79, 22, 99, 75];
+        // let sample = vec![75, 58, 88, 72, 70];
         let mut unsampled = vec![];
         for key in &keys {
             if !sample.contains(key) {
@@ -1370,11 +1372,10 @@ mod tests {
         println!("After removal, tree should contain {} keys {:?}\n", expected_tree_length - sample.len(), &unsampled);
         println!("Starting tree size = {}", avl_tree.len);
         for key in &sample {
-            // println!("Removing {}", &key);
+            println!("Removing {}", &key);
             let removed = avl_tree.remove(&key);
             expected_tree_length -= 1;
-            // avl_tree.display();
-            // println!();
+            avl_tree.display();
             assert!(avl_tree.is_balanced());
             assert_eq!(avl_tree.len, expected_tree_length);
         }
@@ -1386,7 +1387,7 @@ mod tests {
     #[test]
     fn test_insertion_and_link_finding() {
         println!("\n-----TESTING INSERTION AND LINK FINDING-----\n");
-        let mut avl_tree: AVLTree<i32, Option<&str>> = AVLTree::new();
+        let mut avl_tree: AVLTree<i32> = AVLTree::new();
         let mut rng = rand::thread_rng();
         // let keys: Vec<i32> = vec![29, 1, 9, 36, 48, 40, 46, 76, 79, 1, 94, 53, 29, 97, 83];
         let mut keys: Vec<i32> = (0..10).map(|_| rng.gen_range(0..100)).collect();
@@ -1420,7 +1421,7 @@ mod tests {
     #[test]
     fn test_traversal() {
         println!("\n---------TESTING TREE TRAVERSAL---------\n");
-        let mut avl_tree: AVLTree<f32, Option<&str>> = AVLTree::new();
+        let mut avl_tree: AVLTree<f32> = AVLTree::new();
         let mut rng = rand::thread_rng();
         let mut keys: Vec<f32> = (0..20).map(|_| rng.gen_range(0..10000) as f32 / 100.0).collect();
         // let mut keys: Vec<f32> = vec![9.28, 7.58, 21.24, 0.15, 40.44, 47.91, 23.73, 74.31, 92.96, 94.17, 80.55, 88.54, 69.34, 85.36, 44.4, 19.64, 42.54, 5.14, 26.84, 3.27];
@@ -1447,7 +1448,7 @@ mod tests {
     #[test]
     fn test_removals() {
         println!("\n---------TESTING NODE REMOVALS---------\n");
-        let mut avl_tree: AVLTree<f32, Option<&str>> = AVLTree::new();
+        let mut avl_tree: AVLTree<f32> = AVLTree::new();
         let mut rng = rand::thread_rng();
         let mut keys: Vec<f32> = (0..10).map(|_| rng.gen_range(0..10000) as f32 / 100.0).collect();
         // let mut keys: Vec<f32> = vec![21.38, 14.79, 6.95, 26.43, 44.5, 79.57, 82.11, 20.5, 86.45, 67.8];

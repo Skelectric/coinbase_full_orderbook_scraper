@@ -1,13 +1,19 @@
 [package]
-name = "avl_tree"
+name = "algo_trader"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+push-trait = "0.6.0"
 lazy_static = "1.4.0"
 rand = "0.8.5"
 chrono = "0.4.22"
 rust_decimal = "1.26"
 rust_decimal_macros = "1.26"
+barter-data = "0.5.6"
+barter-integration = "0.3.4"
+barter = "0.8.2"
+tokio = "1.21.1"
+futures = "0.3.21"

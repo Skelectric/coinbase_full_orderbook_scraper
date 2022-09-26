@@ -8,7 +8,8 @@ lvl3_scraper_coinbase/data/
 lvl3_scraper_coinbase/hide/
 reference/
 accounts.json
-/target/
+target/
+Cargo.lock
 
 # Compiled source #
 ###################
