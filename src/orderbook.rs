@@ -231,9 +231,14 @@ impl OrderStack {
         self.0.remove(index)
     }
 
-    /// Return sum of order sizes
+    /// Return cumulative order size
     pub fn cum_order_size(&self) -> Decimal {
         self.0.iter().fold(dec![0], |sum, order| sum + order.size)
+    }
+
+    /// Return orderstack's size
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
 }

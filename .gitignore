@@ -10,6 +10,7 @@ reference/
 accounts.json
 target/
 Cargo.lock
+.github/
 
 # Compiled source #
 ###################

@@ -1,4 +1,4 @@
-"""Build AVL-tree orderbook using webhook to Coinbase's FULL channel."""
+"""Build orderbook using webhook to Coinbase's FULL channel."""
 
 from loguru import logger
 import os
@@ -38,14 +38,14 @@ LOG_TO_FILE = False
 
 WEBHOOK_ONLY = False
 
-ENABLE_SNAPSHOT = True
+ENABLE_SNAPSHOT = False
 
-SAVE_FEED = False
+SAVE_FEED = True
 SAVE_ORDERBOOK_SNAPSHOT = False
 
-LOAD_LOCAL_DATA = False  # If true, no webhook. Load orderbook snapshot and websocket feed from local files below
+LOAD_LOCAL_DATA = True  # If true, no webhook. Load orderbook snapshot and websocket feed from local files below
 FEED_FILEPATH \
-    = 'data/08-26-2022_Coinbase_ETH-USD/Coinbase_full_ETH-USD_dump_20220826-065732.json.gz'
+    = 'data/09-27-2022_Coinbase_ETH-USD/Coinbase_full_ETH-USD_dump_20220927-193128.json.gz'
 SNAPSHOT_FILEPATH \
     = 'data/08-26-2022_Coinbase_ETH-USD/Coinbase_orderbook_snapshot_ETH-USD_34709854791_20220826-065735.json.gz'
 
@@ -73,7 +73,7 @@ SAVE_INTERVAL = 360
 KEEP_MATCHES_IN_MEMORY = True
 KEEP_CANDLES_IN_MEMORY = True
 
-PLOT_PERFORMANCE = True
+PLOT_PERFORMANCE = False
 PERF_PLOT_INTERVAL = 0.1  # output to performance plotter queue every interval seconds
 PERF_PLOT_WINDOW = 900  # in seconds (approximate)
 

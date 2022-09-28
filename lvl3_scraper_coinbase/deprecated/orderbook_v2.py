@@ -8,7 +8,7 @@ from enum import Enum, auto
 from loguru import logger
 
 # homebrew
-from lvl3_scraper_coinbase.avl_tree import AVLTree, AVLNode
+from lvl3_scraper_coinbase.deprecated.avl_tree import AVLTree, AVLNode
 from tools.configure_loguru import configure_logger
 configure_logger()
 

@@ -1,5 +1,5 @@
 from loguru import logger
-from avl_tree import AVLTree, AVLNode, InvalidParenting, InvalidBranching
+from lvl3_scraper_coinbase.deprecated.avl_tree import AVLTree, AVLNode
 from tools.configure_loguru import configure_logger
 configure_logger(level="DEBUG")
 

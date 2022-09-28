@@ -13,7 +13,7 @@ use std::ptr::NonNull;
 use std::string::ToString;
 use std::ops::Index;
 // homebrew
-use crate::orderbook::*;
+use crate::orderbook_py::*;
 
 pub trait Remove { fn remove(&mut self, index: usize) -> Self; }
 pub trait New { fn new() -> Self; }
@@ -706,16 +706,21 @@ impl<K> AVLTree<K>
         removed
     }
 
-    /// Remove key-value pair from the tree
+    /// Remove key-value pair from the tree, by key
     pub fn remove(&mut self, key: &K) -> Option<BoxedNode<K>> {
+        let location = self.find_link_location(&key);
+        self.remove_by_location(location)
+    }
+
+    /// Remove key-value pair from the treem, by link location
+    fn remove_by_location(&mut self, location: LinkLocation<K>) -> Option<BoxedNode<K>> {
         // println!("\nCalled remove on {}", &key);
 
-        let insert_position = self.find_link_location(&key);
         let link_for_removal;
         let mut parent: Link<K>;
         let branch;
 
-        match insert_position {
+        match location {
             LinkLocation::None { parent: parent_link, link_ptr} => {
                 return None
             },
