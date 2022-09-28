@@ -36,7 +36,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/Skelectric/Algos">
-    <img src="Algoon-Logo-freelogo-me.jpg" alt="Logo" width="175" height="80">
+    <img src="Algoober-Logo-freelogo-me.jpg" alt="Logo" width="250" height="80">
   </a>
 
 [//]: # ()
@@ -203,10 +203,12 @@ TBD
     - [ ] Basic Avellaneda and Stoikov strategy
     - [ ] Configurable TWAP
     - [ ] Uniswap XYK-style liquidity model
-- [ ] Support more exchanges (via Barter-data or similar)
-- [ ] Blockchain integrations / DEX & Cross-chain arbitrage strategies
+- [ ] Long-term Goals
+  - [ ] Support more exchanges (via Barter-data or similar)
+  - [ ] Research market making strategies
+  - [ ] Blockchain integrations / DEX & Cross-chain arbitrage strategies
 
-See the [open issues](https://github.com/github_username/repo_name/issues) for a full list of proposed features (and known issues).
+[//]: # (See the [open issues]&#40;https://github.com/github_username/repo_name/issues&#41; for a full list of proposed features &#40;and known issues&#41;.)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
