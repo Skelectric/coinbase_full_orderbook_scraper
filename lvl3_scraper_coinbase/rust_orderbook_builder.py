@@ -25,6 +25,7 @@ if sys.platform == 'darwin':
 else:
     import multiprocessing as mp
 
+from rust_orderbook import LimitOrderbook, Order, Side
 
 class JustContinueException(Exception):
     pass

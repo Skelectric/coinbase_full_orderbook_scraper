@@ -8,6 +8,7 @@
 use std::fmt::{Debug, Display};
 use std::iter::zip;
 use std::cmp::{max, Ordering};
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::string::ToString;
@@ -926,6 +927,14 @@ impl<K> AVLTree<K>
         }
     }
 
+
+    pub fn check_pointer_validity(&self, mut error_msgs: HashSet<String>) -> HashSet<String> {
+        let mut tree_iter = self.iter();
+        while let Some(node) = tree_iter.next() {
+            if node.
+        }
+    }
+
     /// Display tree
     ///
     /// Calls the display tree method in the root node.
@@ -977,6 +986,10 @@ impl<'a, K> Iterator for Iter<'a, K>
             match &self.first_move {
 
                 true => {
+
+                    if self.current_link.is_none() {
+                        return None
+                    }
 
                     // move down to the left-most link and return its item
                     while (*self.current_link.unwrap().as_ptr()).left.is_some() {
@@ -1057,6 +1070,10 @@ impl<'a, K> DoubleEndedIterator for Iter <'a, K>
             match &self.first_move {
 
                 true => {
+
+                    if self.current_link.is_none() {
+                        return None
+                    }
 
                     // move down to the right-most link and return its item
                     while (*self.current_link.unwrap().as_ptr()).right.is_some() {
@@ -1331,18 +1348,12 @@ mod tests {
     {
         let max = vector.iter().fold(&vector[0], |a,b| a.max(b)).clone();
         let min = vector.iter().fold(&vector[0], |a,b| a.min(b)).clone();
-        println!("generating disjoint elements between {} and {}", min, max);
-        let mut elements: Vec<T> = Vec::new();
-        for _ in 0..amount {
-            loop {
-                let rand_key = rng.gen_range(min..max);
-                let contains = vector.iter().any(|&x| x==rand_key);
-                if !contains {
-                    elements.push(rand_key);
-                    break
-                }
-            };
-        }
+        let elements: Vec<T> = (0..amount)
+            .map(|_| rng.gen_range(min..max))
+            .filter(|x| !vector.contains(x))
+            .collect();
+
+        // println!("generating disjoint elements between {} and {}", min, max);
         elements
     }
 

@@ -15,7 +15,7 @@ from multiprocessing import Process
 from api_coinbase import CoinbaseAPI
 from api_coinbase_pro import CoinbaseProAPI
 from websockets_coinbase import WebsocketClient, WebsocketClientHandler
-from orderbook_builder import OrderbookBuilder, OrderbookSnapshotHandler
+from py_orderbook_builder import OrderbookBuilder, OrderbookSnapshotHandler
 from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
 from tools.configure_loguru import configure_logger
