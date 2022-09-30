@@ -102,27 +102,34 @@ class PerformancePlotter:
         self.p2.setLabel('left', 'item processing rate')
         self.p2.setDownsampling(mode='subsample')
 
+        # time delta - traversal plot
+        self.p3 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
+        self.p3.setLabel('bottom', 'elapsed time')
+        self.p3.setLabel('left', 'timedelta', units='seconds')
+        self.p3.setDownsampling(mode='subsample')
+        self.p3.addLegend()
+
         self.pw.nextRow()
 
         # latency plot
-        self.p3 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
-        self.p3.setLabel('bottom', 'elapsed time')
-        self.p3.setLabel('left', 'avg latency', units='seconds')
-        self.p3.setDownsampling(mode='subsample')
-
-        # time delta plot
         self.p4 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
         self.p4.setLabel('bottom', 'elapsed time')
-        self.p4.setLabel('left', 'timedelta', units='seconds')
+        self.p4.setLabel('left', 'avg latency', units='seconds')
         self.p4.setDownsampling(mode='subsample')
-        self.p4.addLegend()
 
-        # queue size plot
+        # time delta - removal and insertions plot
         self.p5 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
         self.p5.setLabel('bottom', 'elapsed time')
-        self.p5.setLabel('left', 'queue size', units='items')
+        self.p5.setLabel('left', 'timedelta', units='seconds')
         self.p5.setDownsampling(mode='subsample')
         self.p5.addLegend()
+
+        # queue size plot
+        self.p6 = self.pw.addPlot(axisItems={"bottom": TimeAxisItem(orientation='bottom')})
+        self.p6.setLabel('bottom', 'elapsed time')
+        self.p6.setLabel('left', 'queue size', units='items')
+        self.p6.setDownsampling(mode='subsample')
+        self.p6.addLegend()
 
         # restrict plot dimensions
         self.pw.ci.layout.setColumnPreferredWidth(1, 250)
@@ -179,6 +186,7 @@ class PerformancePlotter:
                 self.update_p2()
                 self.update_p3()
                 self.update_p4()
+                self.update_p5()
                 self.update_self_stats()
             # haven't figured out a way to stop event loop without raising ValueError
             except ValueError:
@@ -199,42 +207,52 @@ class PerformancePlotter:
     @run_once_per_interval("perf_plot_interval")
     def update_self_stats(self):
         self.update_data_for_self()
-        self.update_p5()
+        self.update_p6()
 
     def update_p1(self):
         self.p1.clear()
-        for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "timestamp", "total")
-            if item is not None:
-                self.p1.addItem(item)
+        # for process in (key for key in self.data.keys() if key != "performance_plotter"):
+        item = self.make_curve_item("orderbook_builder_thread", "timestamp", "total")
+        if item is not None:
+            # print(f"update_p1 - process: {process}")
+            self.p1.addItem(item)
 
     def update_p2(self):
         self.p2.clear()
-        for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "elapsed", "marginal", (True, 20))
-            if item is not None:
-                self.p2.addItem(item)
+        # for process in (key for key in self.data.keys() if key != "performance_plotter"):
+        item = self.make_curve_item("orderbook_builder_thread", "elapsed", "marginal", (True, 20))
+        if item is not None:
+            # print(f"update_p2 - process: {process}")
+            self.p2.addItem(item)
 
     def update_p3(self):
         self.p3.clear()
-        for process in (key for key in self.data.keys() if key != "performance_plotter"):
-            item = self.make_curve_item(process, "elapsed", "avg_latency")
-            if item is not None:
-                self.p3.addItem(item)
+        item = self.make_curve_item("traversal", "elapsed", "delta", (True, 100))
+        if item is not None:
+            self.p3.addItem(item)
 
     def update_p4(self):
         self.p4.clear()
-        for process in (key for key in self.data.keys()):
-            item = self.make_curve_item(process, "elapsed", "delta", (True, 100))
-            if item is not None:
-                self.p4.addItem(item)
+        # for process in (key for key in self.data.keys() if key != "performance_plotter"):
+        item = self.make_curve_item("orderbook_builder_thread", "elapsed", "avg_latency")
+        if item is not None:
+            # print(f"update_p4 - process: {process}")
+            self.p4.addItem(item)
 
     def update_p5(self):
         self.p5.clear()
+        for process in ("order_insert", "order_remove"):
+            item = self.make_curve_item(process, "elapsed", "delta", (True, 100))
+            if item is not None:
+                # print(f"update_p5 - process: {process}")
+                self.p5.addItem(item)
+
+    def update_p6(self):
+        self.p6.clear()
         process = "performance_plotter"
         item = self.make_curve_item(process, "elapsed", "queue_size", (True, 10))
         if item is not None:
-            self.p5.addItem(item)
+            self.p6.addItem(item)
 
     def make_curve_item(
             self, process: str, x_var: str, y_var: str,
@@ -301,15 +319,15 @@ class PerformancePlotter:
     def get_data(self) -> any:
         return self.queue.get(block=True)
 
-    def get_data_old(self) -> any:
-        while True:
-            try:
-                item = self.queue.get()
-            except Empty:
-                continue
-            else:
-                if item is not None:
-                    return item
+    # def get_data_old(self) -> any:
+    #     while True:
+    #         try:
+    #             item = self.queue.get()
+    #         except Empty:
+    #             continue
+    #         else:
+    #             if item is not None:
+    #                 return item
 
     def remove_process(self, process: str) -> None:
         logger.debug(f"Removing {process} from stats plotting.")

@@ -261,6 +261,8 @@ class OrderbookBuilder:
                 "order_insert", module_timer=self.module_timer, count=False, latency=False, delta=True)
             self.order_remove_perf = PerfPlotQueueItem(
                 "order_remove", module_timer=self.module_timer, count=False, latency=False, delta=True)
+            self.traversal_perf = PerfPlotQueueItem(
+                "traversal", module_timer=self.module_timer, count=False, latency=False, delta=True)
 
     def __load_queue_with_next(self):
         assert self.__load_feed is True
@@ -655,8 +657,17 @@ class OrderbookBuilder:
         # Using try-except as in __end_output_data() results in latency climb
         if self.output_queue is not None and self.output_queue.qsize() < self.output_queue._maxsize:
             timestamp = datetime.strptime(self.lob.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%m/%d/%Y-%H:%M:%S")
+
+            if hasattr(self, "traversal_perf"):
+                self.traversal_perf.timedelta()
+
             bid_levels = self.lob.levels(Side.Bids)
             ask_levels = self.lob.levels(Side.Asks)
+
+            if hasattr(self, "traversal_perf"):
+                self.traversal_perf.timedelta(log=True)
+
+
             data = {
                 "timestamp": timestamp,
                 "sequence": self.__sequence,
@@ -685,6 +696,7 @@ class OrderbookBuilder:
             self.ob_builder_perf.send_to_queue(self.stats_queue)
             self.order_insert_perf.send_to_queue(self.stats_queue)
             self.order_remove_perf.send_to_queue(self.stats_queue)
+            self.traversal_perf.send_to_queue(self.stats_queue)
 
     @run_once
     def __end_perf_data(self):
@@ -692,10 +704,13 @@ class OrderbookBuilder:
             self.ob_builder_perf.signal_end_item()
             self.order_insert_perf.signal_end_item()
             self.order_remove_perf.signal_end_item()
+            self.traversal_perf.signal_end_item()
 
             self.ob_builder_perf.send_to_queue(self.stats_queue)
             self.order_insert_perf.send_to_queue(self.stats_queue)
             self.order_remove_perf.send_to_queue(self.stats_queue)
+            self.traversal_perf.send_to_queue(self.stats_queue)
+
             logger.debug(f"Orderbook builder sent 'None' to stats queue.")
 
     def display_subscription(self, item: dict):
