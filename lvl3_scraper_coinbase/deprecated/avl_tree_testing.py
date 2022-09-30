@@ -102,7 +102,7 @@ def display_tree():
         avl_tree.display_tree()
 
 
-# testing
+# tests
 if __name__ == "__main__":
     avl_tree = AVLTree()
 

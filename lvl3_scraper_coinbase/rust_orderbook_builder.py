@@ -12,7 +12,7 @@ import copy
 from loguru import logger
 from termcolor import colored
 
-from orderbook import LimitOrderBook, Order
+from rust_orderbook import LimitOrderbook, Order, Side, Submit
 from tools.helper_tools import s_print
 from tools.timer import Timer
 from tools.run_once_per_interval import run_once_per_interval, run_once
@@ -25,7 +25,6 @@ if sys.platform == 'darwin':
 else:
     import multiprocessing as mp
 
-from rust_orderbook import LimitOrderbook, Order, Side
 
 class JustContinueException(Exception):
     pass
@@ -181,7 +180,7 @@ class OrderbookBuilder:
         self.queue = queue
         self.lob = None
         if kwargs.get("build_orderbook", True):
-            self.lob = LimitOrderBook()
+            self.lob = LimitOrderbook()
 
         # queue mode tracking and debugging
         self.__first_sequence = None
@@ -253,6 +252,7 @@ class OrderbookBuilder:
 
         # performance monitoring
         self.stats_queue = kwargs.get("stats_queue", None)
+        self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
         if self.stats_queue is not None:
             assert type(self.stats_queue) == type(mp.Queue()), "passed stats queue is not a multiprocessing queue!"
             self.ob_builder_perf = PerfPlotQueueItem("orderbook_builder_thread", module_timer=self.module_timer)
@@ -261,8 +261,6 @@ class OrderbookBuilder:
                 "order_insert", module_timer=self.module_timer, count=False, latency=False, delta=True)
             self.order_remove_perf = PerfPlotQueueItem(
                 "order_remove", module_timer=self.module_timer, count=False, latency=False, delta=True)
-
-            self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
 
     def __load_queue_with_next(self):
         assert self.__load_feed is True
@@ -361,7 +359,8 @@ class OrderbookBuilder:
             except AttributeError as e:
                 logger.warning(f"Attribute Error: {e} caused by {item}")
             else:
-                self.ob_builder_perf.track(timestamp=self.latest_timestamp.timestamp())
+                if self.stats_queue is not None:
+                    self.ob_builder_perf.track(timestamp=self.latest_timestamp.timestamp())
                 self.__lob_checked = False
 
         except q.Empty as e:
@@ -467,10 +466,17 @@ class OrderbookBuilder:
             item.get("old_size"), item.get("new_size"), \
             item.get("price"), item.get("time"), item.get("client_oid")
 
-        self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ") \
-            if timestamp is not None else datetime.utcnow()
+        try:
+            self.latest_timestamp = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ") \
+                if timestamp is not None else datetime.utcnow()
+        except ValueError:
+            self.latest_timestamp = str(datetime.utcnow())
 
-        is_bid = True if side == "buy" else False
+        # Rust Enum must be handled uniquely
+        if side == "buy":
+            side = Side.Bids
+        elif side == "sell":
+            side = Side.Asks
 
         if self.__first_sequence is None and sequence is not None:
             self.__log_first_sequence(sequence)
@@ -502,19 +508,22 @@ class OrderbookBuilder:
                 if self.__snapshot_sequence is None:
                     self.__log_snapshot_sequence(sequence)
             case "received":
-                if None in {item_type, order_id}:
+                if None in [item_type, order_id]:
                     logger.info(f"Invalid received msg: {item}")
                     valid_received = False
             case "open":
-                if None in {item_type, order_id, side, remaining_size, price}:
+                if None in [item_type, order_id, remaining_size, price]:
+                    logger.info(f"Invalid open msg.")
+                    valid_open = False
+                if side not in [Side.Asks, Side.Bids]:
                     logger.info(f"Invalid open msg.")
                     valid_open = False
             case "done":
-                if None in {item_type, order_id}:
+                if None in [item_type, order_id]:
                     logger.info(f"Invalid done msg.")
                     valid_done = False
             case "change":
-                if None in {item_type, order_id, new_size}:
+                if None in [item_type, order_id, new_size]:
                     logger.info(f"Invalid change msg.")
                     valid_change = False
 
@@ -544,15 +553,19 @@ class OrderbookBuilder:
 
                     order = Order(
                         uid=order_id,
-                        is_bid=is_bid,
-                        size=float(remaining_size),
+                        side=side,
                         price=float(price),
-                        timestamp=timestamp
+                        size=float(remaining_size),
+                        timestamp=timestamp,
                     )
 
-                    self.order_insert_perf.timedelta()  # reset timer
-                    self.lob.process(order, action="add")
-                    self.order_insert_perf.timedelta(log=True)  # log elapsed
+                    if hasattr(self, "order_insert_perf"):
+                        self.order_insert_perf.timedelta()  # reset timer
+
+                    self.lob.process(order, Submit.Insert)
+
+                    if hasattr(self, "order_insert_perf"):
+                        self.order_insert_perf.timedelta(log=True)  # log elapsed
 
                     if output_data:
                         self.output_data()
@@ -570,15 +583,19 @@ class OrderbookBuilder:
 
                     order = Order(
                         uid=order_id,
-                        is_bid=is_bid,
-                        size=None,
+                        side=side,
                         price=None,
+                        size=None,
                         timestamp=timestamp,
                     )
 
-                    self.order_remove_perf.timedelta()  # reset timer
-                    self.lob.process(order, action="remove")
-                    self.order_remove_perf.timedelta(log=True)  # log elapsed
+                    if hasattr(self, "order_remove_perf"):
+                        self.order_remove_perf.timedelta()  # reset timer
+
+                    self.lob.process(order, Submit.Remove)
+
+                    if hasattr(self, "order_remove_perf"):
+                        self.order_remove_perf.timedelta(log=True)  # log elapsed
 
                     if output_data:
                         self.output_data()
@@ -596,13 +613,13 @@ class OrderbookBuilder:
 
                     order = Order(
                         uid=order_id,
-                        is_bid=is_bid,
-                        size=float(new_size),
+                        side=side,
                         price=None,
+                        size=float(new_size),
                         timestamp=timestamp,
                     )
 
-                    self.lob.process(order, action="change")
+                    self.lob.process(order, Submit.Update)
 
                     if output_data:
                         self.output_data()
@@ -638,15 +655,16 @@ class OrderbookBuilder:
         # Using try-except as in __end_output_data() results in latency climb
         if self.output_queue is not None and self.output_queue.qsize() < self.output_queue._maxsize:
             timestamp = datetime.strptime(self.lob.timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%m/%d/%Y-%H:%M:%S")
-            bid_levels, ask_levels = self.lob.levels
+            bid_levels = self.lob.levels(Side.Bids)
+            ask_levels = self.lob.levels(Side.Asks)
             data = {
                 "timestamp": timestamp,
                 "sequence": self.__sequence,
                 "bid_levels": bid_levels,
-                "ask_levels": ask_levels
+                "ask_levels": ask_levels,
             }
-            # logger.debug(f"PLACING item {self.output_item_counter}: bid_levels {bid_levels}")
-            # logger.debug(f"PLACING item {self.output_item_counter}: ask_levels {ask_levels}")
+            # logger.info(f"PLACING bid_levels {bid_levels}")
+            # logger.info(f"PLACING ask_levels {ask_levels}")
             try:
                 self.output_queue.put(data, block=False)
             except q.Full:
@@ -689,7 +707,7 @@ class OrderbookBuilder:
     def __log_summary(self):
         logger.info("________________________________ Summary ________________________________")
         if self.lob is not None:
-            self.lob.log_details()
+            print(self.lob.log_notes())
         logger.info(f"Matches processed = {self.matches.total_items:,}")
         if self.candles is not None:
             logger.info(f"Candles generated = {self.candles.total_items}")
@@ -700,7 +718,8 @@ class OrderbookBuilder:
             average_timedelta = sum(self.__queue_stats["delta"], timedelta(0)) / len(self.__queue_stats["delta"])
             logger.info(f"Average latency = {average_timedelta}")
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
-            logger.info(f"Total items processed from queue = {self.ob_builder_perf.total:,}")
+            if hasattr(self, "ob_builder_perf"):
+                logger.info(f"Total items processed from queue = {self.ob_builder_perf.total:,}")
 
         if len(self.__missing_sequences) != 0:
             logger.warning(f"{len(self.__missing_sequences)} missing sequences.")
@@ -844,8 +863,9 @@ class OrderbookBuilder:
         delta = datetime.utcnow() - self.__last_timestamp
         # logger.debug(delta.total_seconds())
         if delta.total_seconds() > 0.1:
-            dones_per_sec = self.ob_builder_perf.marginal // delta.total_seconds()
-            logger.info(f"Items processed per second = {dones_per_sec:,}")
+            if hasattr(self, "ob_builder_perf"):
+                dones_per_sec = self.ob_builder_perf.marginal // delta.total_seconds()
+                logger.info(f"Items processed per second = {dones_per_sec:,}")
             self.__last_timestamp = datetime.utcnow()
 
     @run_once_per_interval("_queue_stats_interval")

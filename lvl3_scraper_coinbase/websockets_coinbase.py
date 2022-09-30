@@ -61,9 +61,9 @@ class WebsocketClient:
         # performance monitoring
         self.latest_timestamp = None
         self.stats_queue = stats_queue
+        self.stats_queue_interval = stats_queue_interval
         if self.stats_queue is not None:
             self.websocket_perf = PerfPlotQueueItem("websocket_thread", module_timer=module_timer)
-            self.stats_queue_interval = stats_queue_interval
 
     def websocket_thread(self) -> None:
         self.ws = create_connection(self.ws_url)
@@ -153,7 +153,8 @@ class WebsocketClient:
         else:
             self.latest_timestamp = datetime.utcnow().timestamp()
         self.data_queue.put(msg)
-        self.websocket_perf.track(timestamp=self.latest_timestamp)
+        if hasattr(self, "websocket_perf"):
+            self.websocket_perf.track(timestamp=self.latest_timestamp)
 
     def start_thread(self) -> None:
         logger.info(f"Starting websocket thread for {self.id}....")

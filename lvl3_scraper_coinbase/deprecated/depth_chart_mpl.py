@@ -12,6 +12,8 @@ from matplotlib import pyplot as plt
 from matplotlib.backend_bases import NavigationToolbar2, Event
 matplotlib.use('TkAgg')
 
+np.set_printoptions(suppress=True)
+
 # ======================================================================================
 import sys
 # Platform specific imports and config
@@ -106,6 +108,8 @@ class DepthChartPlotter:
         self.ax.xlim_prev = None
         self.ax.ylim_prev = None
 
+        self.reopen_prompt_flag = True
+
         logger.debug("DepthChartPlotter initialized.")
 
     def close(self):
@@ -128,7 +132,6 @@ class DepthChartPlotter:
         that occurs when script is ending. Lets user have the option to reopen window."""
         logger.debug(f"Depth Chart window closed.")
         self.closed = True
-        self.reopen_prompt_flag = True
 
     def on_click(self, event):
         # logger.debug(f"Mouse clicked. Setting self.pause to True")
@@ -344,6 +347,12 @@ class DepthChartPlotter:
                 ask_sizes = np.vectorize(lambda x: x[1])(asks)
                 ask_depth = np.cumsum(ask_sizes)
                 ask_liquidity = np.multiply(ask_prices, ask_depth)
+
+        # print("bid_prices, bid_depth, bid_liquidity")
+        # print(bid_prices, bid_depth, bid_liquidity)
+        #
+        # print("ask_prices, ask_depth, ask_liquidity")
+        # print(ask_prices, ask_depth, ask_liquidity)
 
         return bid_prices, bid_depth, bid_liquidity, ask_prices, ask_depth, ask_liquidity
 

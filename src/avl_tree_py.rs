@@ -14,7 +14,7 @@ use std::ptr::NonNull;
 use std::string::ToString;
 use std::ops::Index;
 // homebrew
-use crate::orderbook_py::*;
+use crate::orderbook::*;
 
 pub trait Remove { fn remove(&mut self, index: usize) -> Self; }
 pub trait New { fn new() -> Self; }
@@ -84,6 +84,9 @@ impl<K> AVLTree<K>
         self.len
     }
 
+    /// Return true if tree is empty
+    pub fn is_empty(&self) -> bool { if self.len == 0 { true } else { false } }
+
     /// Get reference to key's value
     pub fn get(&self, key: &K) -> Option<&OrderStack> {
         let link = self.find_link(&key);
@@ -111,9 +114,11 @@ impl<K> AVLTree<K>
 
     /// Return if tree is balanced
     pub fn is_balanced(&self) -> bool {
-        let balance = Self::balance_factor(&self.root) as i32;
-        let balanced_range = -1..=1;
-        balanced_range.contains(&balance)
+        if self.root.is_some() {
+            let balance = Self::balance_factor(&self.root) as i32;
+            let balanced_range = -1..=1;
+            balanced_range.contains(&balance)
+        } else { true }
     }
 
     /// Get immutable reference to a link associated with the passed key
@@ -931,11 +936,51 @@ impl<K> AVLTree<K>
     pub fn check_pointer_validity(&self, mut error_msgs: HashSet<String>) -> HashSet<String> {
         let mut tree_iter = self.iter();
         while let Some(node) = tree_iter.next() {
-            if node.
+
+            if node.left.is_some() {
+                let left = unsafe { &*node.left.unwrap().as_ptr() };
+                let left_parent = unsafe { &*left.parent.unwrap().as_ptr() };
+
+                // check key ordering validity
+                match left.key.partial_cmp(&node.key) {
+                    Some(Ordering::Greater) | Some(Ordering::Equal) | None => {
+                        let msg: String = format!("Invalid branching found: node {}, left {}", node.key, left.key);
+                        error_msgs.insert(msg);
+                    },
+                    _ => {}
+                }
+
+                // check parent validity
+                if node.key != left_parent.key {
+                    let msg: String = format!("Invalid parent/child references found: node {}, left.parent {}", node.key, left_parent.key);
+                    error_msgs.insert(msg);
+                }
+            }
+
+            if node.right.is_some() {
+                let right = unsafe { &*node.right.unwrap().as_ptr() };
+                let right_parent = unsafe { &*right.parent.unwrap().as_ptr() };
+
+                // check key ordering validity
+                match right.key.partial_cmp(&node.key) {
+                    Some(Ordering::Less) | Some(Ordering::Equal) | None => {
+                        let msg: String = format!("Invalid branching found: node {}, right {}", node.key, right.key);
+                        error_msgs.insert(msg);
+                    },
+                    _ => {}
+                }
+
+                // check parent validity
+                if node.key != right_parent.key {
+                    let msg: String = format!("Invalid parent/child references found: node {}, right.parent {}", node.key, right_parent.key);
+                    error_msgs.insert(msg);
+                }
+            }
         }
+        error_msgs
     }
 
-    /// Display tree
+    /// Returns printable tree string
     ///
     /// Calls the display tree method in the root node.
     pub fn display(&self) -> Vec<String> {
@@ -971,7 +1016,8 @@ unsafe impl<K> Send for AVLTree<K>
 
 impl<'a, K> Iterator for Iter<'a, K>
     where K: Display + Debug + PartialOrd + Clone {
-    type Item = (&'a K, &'a OrderStack);
+    // type Item = (&'a K, &'a OrderStack);
+    type Item = &'a Node<K>;
 
     /// In-order BST traversal algorithm
     /// 1) For first move only, move down to the left-most link and return
@@ -996,10 +1042,7 @@ impl<'a, K> Iterator for Iter<'a, K>
                         self.current_link = (*self.current_link.unwrap().as_ptr()).left
                     }
                     self.first_move = false;
-                    item = Some((
-                        &(*self.current_link.unwrap().as_ptr()).key,
-                        &(*self.current_link.unwrap().as_ptr()).value,
-                    ));
+                    item = Some(&(*self.current_link.unwrap().as_ptr()));
                 },
 
                 false => {
@@ -1013,10 +1056,7 @@ impl<'a, K> Iterator for Iter<'a, K>
                         }
 
                         // return key-value pair
-                        item = Some((
-                            &(*self.current_link.unwrap().as_ptr()).key,
-                            &(*self.current_link.unwrap().as_ptr()).value,
-                        ));
+                        item = Some(&(*self.current_link.unwrap().as_ptr()));
 
                     // otherwise, attempt to move up
                     } else {
@@ -1032,10 +1072,7 @@ impl<'a, K> Iterator for Iter<'a, K>
                                 Branch::Left => {
                                     // if this is the left branch, then we move up and to the right once
                                     self.current_link = (*self.current_link.unwrap().as_ptr()).parent;
-                                    item = Some((
-                                        &(*self.current_link.unwrap().as_ptr()).key,
-                                        &(*self.current_link.unwrap().as_ptr()).value,
-                                    ));
+                                    item = Some(&(*self.current_link.unwrap().as_ptr()));
                                     break;
                                 }
 
@@ -1080,10 +1117,7 @@ impl<'a, K> DoubleEndedIterator for Iter <'a, K>
                         self.current_link = (*self.current_link.unwrap().as_ptr()).right
                     }
                     self.first_move = false;
-                    item = Some((
-                        &(*self.current_link.unwrap().as_ptr()).key,
-                        &(*self.current_link.unwrap().as_ptr()).value,
-                    ));
+                    item = Some(&(*self.current_link.unwrap().as_ptr()));
                 },
 
                 false => {
@@ -1097,11 +1131,7 @@ impl<'a, K> DoubleEndedIterator for Iter <'a, K>
                         }
 
                         // return key-value pair
-                        item = Some((
-                            &(*self.current_link.unwrap().as_ptr()).key,
-                            &(*self.current_link.unwrap().as_ptr()).value,
-                        ));
-
+                        item = Some(&(*self.current_link.unwrap().as_ptr()));
                     // otherwise, attempt to move up
                     } else {
                         loop {
@@ -1116,10 +1146,7 @@ impl<'a, K> DoubleEndedIterator for Iter <'a, K>
                                 Branch::Right => {
                                     // if this is the right branch, then we move up and to the left once
                                     self.current_link = (*self.current_link.unwrap().as_ptr()).parent;
-                                    item = Some((
-                                        &(*self.current_link.unwrap().as_ptr()).key,
-                                        &(*self.current_link.unwrap().as_ptr()).value,
-                                    ));
+                                    item = Some(&(*self.current_link.unwrap().as_ptr()));
                                     break;
                                 }
 
@@ -1199,12 +1226,9 @@ impl<K> Node<K>
         } else {Branch::Root}
     }
 
-    /// Display tree wrapper
+    /// Display tree wrapper method
     fn display(&self) -> Vec<String>{
         let (lines, _, _, _) = Node::display_aux(self);
-        for line in &lines {
-            println!("{}", line)
-        };
         lines
     }
 
@@ -1297,7 +1321,6 @@ enum Children {
     Right,
     Both,
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1397,7 +1420,7 @@ mod tests {
         }
         avl_tree.display();
         println!("Tree size = {}, expected = {}", avl_tree.len, expected_tree_length);
-        println!("Remaining keys = {:?}", avl_tree.iter().map(|(k, v)| k).collect::<Vec<&i32>>());
+        println!("Remaining keys = {:?}", avl_tree.iter().map(|node| node.key).collect::<Vec<i32>>());
     }
 
     #[test]
@@ -1449,8 +1472,8 @@ mod tests {
         keys.sort_by(|a,b| a.partial_cmp(b).unwrap());
         keys.dedup();
 
-        let inorder: Vec<f32> = avl_tree.iter().map(|x| *x.0).collect();
-        let reverse: Vec<f32> = avl_tree.iter().rev().map(|x| *x.0).collect();
+        let inorder: Vec<f32> = avl_tree.iter().map(|node| node.key).collect();
+        let reverse: Vec<f32> = avl_tree.iter().rev().map(|node| node.key).collect();
         let mut reverse_keys: Vec<f32> = keys.clone();
         reverse_keys.reverse();
         println!("In-order traversal (len {}): {:?}", inorder.len(), inorder);

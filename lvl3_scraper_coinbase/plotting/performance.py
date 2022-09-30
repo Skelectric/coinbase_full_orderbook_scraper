@@ -484,7 +484,7 @@ class PerfPlotQueueItem(dict):
 
 
 if __name__ == "__main__":
-    # testing
+    # tests
     import time
     test_queue = Queue()
     a = PerfPlotQueueItem("dummy")

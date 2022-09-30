@@ -146,7 +146,7 @@ class CoinbaseAPI:
     def load_accounts(self):
         """Load accounts file into list of Account class instances.
         Faster account info retrieval
-        Only useful for testing"""
+        Only useful for tests"""
         if Path(ACCOUNTS_FILE).is_file():
             logger.debug(f"Accounts file found. Loading into memory.")
             with open(ACCOUNTS_FILE, 'r') as f:

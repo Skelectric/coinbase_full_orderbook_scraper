@@ -15,11 +15,11 @@ from multiprocessing import Process
 from api_coinbase import CoinbaseAPI
 from api_coinbase_pro import CoinbaseProAPI
 from websockets_coinbase import WebsocketClient, WebsocketClientHandler
-from py_orderbook_builder import OrderbookBuilder, OrderbookSnapshotHandler
+from rust_orderbook_builder import OrderbookBuilder, OrderbookSnapshotHandler
 from tools.GracefulKiller import GracefulKiller
 from tools.timer import Timer
 from tools.configure_loguru import configure_logger
-import plotting.depth_chart_mpl as dpth
+import plotting.depth_chart_mpl_v2 as dpth
 import plotting.performance as perf
 
 # ======================================================================================
@@ -40,14 +40,14 @@ WEBHOOK_ONLY = False
 
 ENABLE_SNAPSHOT = False
 
-SAVE_FEED = True
+SAVE_FEED = False
 SAVE_ORDERBOOK_SNAPSHOT = False
 
 LOAD_LOCAL_DATA = True  # If true, no webhook. Load orderbook snapshot and websocket feed from local files below
 FEED_FILEPATH \
-    = 'data/09-27-2022_Coinbase_ETH-USD/Coinbase_full_ETH-USD_dump_20220927-193128.json.gz'
+    = 'data/08-30-2022_Coinbase_ETH-USD/Coinbase_full_ETH-USD_dump_20220830-183157.json.gz'
 SNAPSHOT_FILEPATH \
-    = 'data/08-26-2022_Coinbase_ETH-USD/Coinbase_orderbook_snapshot_ETH-USD_34709854791_20220826-065735.json.gz'
+    = 'data/08-30-2022_Coinbase_ETH-USD/Coinbase_orderbook_snapshot_ETH-USD_35140793720_20220830-183202.json.gz'
 
 ITEM_DISPLAY_FLAGS = {
     "received": False,
@@ -63,7 +63,7 @@ ORDERBOOK_SNAPSHOT_DEPTH = 1000
 BUILD_ORDERBOOK = True
 BUILD_MATCHES = True
 BUILD_CANDLES = True
-PLOT_DEPTH_CHART = False
+PLOT_DEPTH_CHART = True
 
 CANDLE_FREQUENCY = '1T'  # 1 min
 # FREQUENCIES = ['1T', '5T', '15T', '1H', '4H', '1D']
@@ -73,7 +73,7 @@ SAVE_INTERVAL = 360
 KEEP_MATCHES_IN_MEMORY = True
 KEEP_CANDLES_IN_MEMORY = True
 
-PLOT_PERFORMANCE = False
+PLOT_PERFORMANCE = True
 PERF_PLOT_INTERVAL = 0.1  # output to performance plotter queue every interval seconds
 PERF_PLOT_WINDOW = 900  # in seconds (approximate)
 

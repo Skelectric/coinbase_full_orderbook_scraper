@@ -100,16 +100,14 @@
 
 [//]: # ([![Product Name Screen Shot][product-screenshot]]&#40;https://example.com&#41;)
 
-Algoon is a work-in-progress algorithmic trading bot.
+Algoober is a work-in-progress algorithmic trading bot.
 
 This is a labor of love and learning by somebody with no formal background in computer science or software development.
-Most functionality use custom data structures and algorithms that have been tested rigorously, but not by any industry-standards.
+Most functionality use custom data structures and algorithms that have been tested rigorously.
 
 Despite integration of Rust for the most computationally-intensive functions, memory-safety and thread-safety is not guaranteed or expected.
 For example, the orderbook's AVL tree implementation relies heavily on unsafe Rust, and although 
-it appears functional in testing, it fails Miri's stack borrowing checks.
-
-Please reach out if you have any questions!
+it has passed numerous tests, it fails Miri's experimental stack borrowing checks.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

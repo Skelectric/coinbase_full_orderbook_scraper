@@ -63,7 +63,7 @@ class OrderbookSnapshotHandler:
         """Save orderbook object as a gzip file."""
         orderbook_snapshot = args[0]
         market = kwargs.get("market", "n/a")
-        folder = kwargs.get("save_folder", "data")
+        folder = kwargs.get("save_folder", "../data")
         exchange = kwargs.get("exchange", "exchange")
         Path(folder).mkdir(parents=True, exist_ok=True)
         sequence = orderbook_snapshot["sequence"]
@@ -126,7 +126,7 @@ class OrderbookBuilder:
         self.__snapshot_order_count = kwargs.get("snapshot_order_count", 0)  # int
         self.__save_matches = kwargs.get("save_matches", False)  # bool
         self.__save_candles = kwargs.get("save_candles", False)  # bool
-        self.__output_folder = kwargs.get("output_folder", "data")  # str
+        self.__output_folder = kwargs.get("output_folder", "../data")  # str
         self.__keep_matches_in_memory = kwargs.get("keep_matches_in_memory", True)
         self.__keep_candles_in_memory = kwargs.get("keep_candles_in_memory", True)
 
@@ -252,6 +252,7 @@ class OrderbookBuilder:
 
         # performance monitoring
         self.stats_queue = kwargs.get("stats_queue", None)
+        self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
         if self.stats_queue is not None:
             assert type(self.stats_queue) == type(mp.Queue()), "passed stats queue is not a multiprocessing queue!"
             self.ob_builder_perf = PerfPlotQueueItem("orderbook_builder_thread", module_timer=self.module_timer)
@@ -260,8 +261,6 @@ class OrderbookBuilder:
                 "order_insert", module_timer=self.module_timer, count=False, latency=False, delta=True)
             self.order_remove_perf = PerfPlotQueueItem(
                 "order_remove", module_timer=self.module_timer, count=False, latency=False, delta=True)
-
-            self.stats_queue_interval = kwargs.get("stats_queue_interval", 1.0)  # float
 
     def __load_queue_with_next(self):
         assert self.__load_feed is True
@@ -360,7 +359,8 @@ class OrderbookBuilder:
             except AttributeError as e:
                 logger.warning(f"Attribute Error: {e} caused by {item}")
             else:
-                self.ob_builder_perf.track(timestamp=self.latest_timestamp.timestamp())
+                if self.stats_queue is not None:
+                    self.ob_builder_perf.track(timestamp=self.latest_timestamp.timestamp())
                 self.__lob_checked = False
 
         except q.Empty as e:
@@ -549,9 +549,13 @@ class OrderbookBuilder:
                         timestamp=timestamp
                     )
 
-                    self.order_insert_perf.timedelta()  # reset timer
+                    if hasattr(self, "order_insert_perf"):
+                        self.order_insert_perf.timedelta()  # reset timer
+
                     self.lob.process(order, action="add")
-                    self.order_insert_perf.timedelta(log=True)  # log elapsed
+
+                    if hasattr(self, "order_insert_perf"):
+                        self.order_insert_perf.timedelta(log=True)  # log elapsed
 
                     if output_data:
                         self.output_data()
@@ -575,9 +579,13 @@ class OrderbookBuilder:
                         timestamp=timestamp,
                     )
 
-                    self.order_remove_perf.timedelta()  # reset timer
+                    if hasattr(self, "order_remove_perf"):
+                        self.order_remove_perf.timedelta()  # reset timer
+
                     self.lob.process(order, action="remove")
-                    self.order_remove_perf.timedelta(log=True)  # log elapsed
+
+                    if hasattr(self, "order_remove_perf"):
+                        self.order_remove_perf.timedelta(log=True)  # log elapsed
 
                     if output_data:
                         self.output_data()
@@ -699,7 +707,8 @@ class OrderbookBuilder:
             average_timedelta = sum(self.__queue_stats["delta"], timedelta(0)) / len(self.__queue_stats["delta"])
             logger.info(f"Average latency = {average_timedelta}")
             logger.info(f"LOB validity checks performed = {self.__lob_check_count}")
-            logger.info(f"Total items processed from queue = {self.ob_builder_perf.total:,}")
+            if hasattr(self, "ob_builder_perf"):
+                logger.info(f"Total items processed from queue = {self.ob_builder_perf.total:,}")
 
         if len(self.__missing_sequences) != 0:
             logger.warning(f"{len(self.__missing_sequences)} missing sequences.")

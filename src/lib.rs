@@ -1,8 +1,8 @@
 pub mod avl_tree_py;
-pub mod orderbook_py;
+pub mod orderbook;
 
 use pyo3::prelude::*;
-use orderbook_py::*;
+use orderbook::*;
 
 /// An unsafe AVL-tree limit orderbook written in Rust
 ///
