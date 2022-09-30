@@ -80,6 +80,7 @@ class PerformancePlotter:
             }
     """
     def __init__(self, queue: Queue, window: int = 1000, *args, **kwargs):
+        self.latest_timestamp = None
         self.queue = queue
         self.app = pg.mkQApp("Worker Stats")
         self.pw = pg.GraphicsLayoutWidget(show=True)
@@ -211,19 +212,19 @@ class PerformancePlotter:
 
     def update_p1(self):
         self.p1.clear()
-        # for process in (key for key in self.data.keys() if key != "performance_plotter"):
-        item = self.make_curve_item("orderbook_builder_thread", "timestamp", "total")
-        if item is not None:
-            # print(f"update_p1 - process: {process}")
-            self.p1.addItem(item)
+        for process in (key for key in self.data.keys() if key != "performance_plotter"):
+            item = self.make_curve_item(process, "timestamp", "total")
+            if item is not None:
+                # print(f"update_p1 - process: {process}")
+                self.p1.addItem(item)
 
     def update_p2(self):
         self.p2.clear()
-        # for process in (key for key in self.data.keys() if key != "performance_plotter"):
-        item = self.make_curve_item("orderbook_builder_thread", "elapsed", "marginal", (True, 20))
-        if item is not None:
-            # print(f"update_p2 - process: {process}")
-            self.p2.addItem(item)
+        for process in (key for key in self.data.keys() if key != "performance_plotter"):
+            item = self.make_curve_item(process, "elapsed", "marginal", (True, 20))
+            if item is not None:
+                # print(f"update_p2 - process: {process}")
+                self.p2.addItem(item)
 
     def update_p3(self):
         self.p3.clear()
@@ -233,11 +234,11 @@ class PerformancePlotter:
 
     def update_p4(self):
         self.p4.clear()
-        # for process in (key for key in self.data.keys() if key != "performance_plotter"):
-        item = self.make_curve_item("orderbook_builder_thread", "elapsed", "avg_latency")
-        if item is not None:
-            # print(f"update_p4 - process: {process}")
-            self.p4.addItem(item)
+        for process in (key for key in self.data.keys() if key != "performance_plotter"):
+            item = self.make_curve_item(process, "elapsed", "avg_latency")
+            if item is not None:
+                # print(f"update_p4 - process: {process}")
+                self.p4.addItem(item)
 
     def update_p5(self):
         self.p5.clear()
@@ -259,26 +260,31 @@ class PerformancePlotter:
             moving_avg: (bool, int) = (False, 10), preserve_ymax: bool = False
     ) -> pg.PlotCurveItem | None:
 
-        x = self.data[process].get(x_var, None)
-        y = self.data[process]["data"].get(y_var, None)
+        if process in self.data.keys():
 
-        if x is None or y is None:
-            return None
+            x = self.data[process].get(x_var, None)
 
-        x = x[~np.isnan(x)]
-        y = y[~np.isnan(y)]
+            if x is not None:
 
-        moving_avg_flag, moving_avg_window = moving_avg
-        if moving_avg_flag:
-            y = uniform_filter1d(y, moving_avg_window)
+                y = self.data[process]["data"].get(y_var, None)
 
-        if len(x) == len(y):
-            item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
-            return item
-        else:
-            logger.warning(f"{process} queued unequal length arrays!")
-            logger.warning(f"{x_var} = {x}")
-            logger.warning(f"{y_var} = {y}")
+                if x is None or y is None:
+                    return None
+
+                x = x[~np.isnan(x)]
+                y = y[~np.isnan(y)]
+
+                moving_avg_flag, moving_avg_window = moving_avg
+                if moving_avg_flag:
+                    y = uniform_filter1d(y, moving_avg_window)
+
+                if len(x) == len(y):
+                    item = pg.PlotCurveItem(x=x, y=y, pen=self.data[process]["pen"], name=process)
+                    return item
+                else:
+                    logger.warning(f"{process} queued unequal length arrays!")
+                    logger.warning(f"{x_var} = {x}")
+                    logger.warning(f"{y_var} = {y}")
 
     def update_data(self):
         item = self.get_data()
@@ -319,20 +325,11 @@ class PerformancePlotter:
     def get_data(self) -> any:
         return self.queue.get(block=True)
 
-    # def get_data_old(self) -> any:
-    #     while True:
-    #         try:
-    #             item = self.queue.get()
-    #         except Empty:
-    #             continue
-    #         else:
-    #             if item is not None:
-    #                 return item
-
     def remove_process(self, process: str) -> None:
-        logger.debug(f"Removing {process} from stats plotting.")
         if process in self.data.keys():
             self.data.pop(process)
+
+        # print(list(self.data.keys()))
 
         # logger.debug(f"Remaining processes: {self.data.keys()}")
         if list(self.data.keys()) == ['performance_plotter']:

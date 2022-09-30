@@ -6,7 +6,7 @@ from tools.timer import Timer
 import easygui
 import signal
 import ctypes
-
+from tools.configure_loguru import configure_logger
 import matplotlib
 from matplotlib import pyplot as plt
 from matplotlib.backend_bases import NavigationToolbar2, Event
@@ -26,6 +26,7 @@ elif sys.platform == 'darwin':
 
 def initialize_plotter(*args, **kwargs):
     """Needed for multiprocessing."""
+    configure_logger()
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     queue = args[0]
     title = kwargs.get('title')

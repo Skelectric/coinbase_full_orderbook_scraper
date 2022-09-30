@@ -8,21 +8,23 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::iter::{Peekable};
+use cc_traits::{Collection, Len, PushBack};
 // Crates
 use serde::{Serialize, Deserialize};
 use pyo3::prelude::*;
 use chrono::Utc;
+use crate::avl_tree;
+use crate::avl_tree::New;
 // Homebrew
-use crate::avl_tree_py::{AVLTree, Node};
+use crate::avl_tree::{AVLTree, Node};
 
-type SideKey = (Side, f64);
 
 /// Struct representing the Limit orderbook of a single market
 #[pyclass]
 pub struct LimitOrderbook {
-    bids: AVLTree<f64>,
-    asks: AVLTree<f64>,
-    order_map: HashMap<String, SideKey>,
+    bids: AVLTree<f64, OrderStack, Order>,
+    asks: AVLTree<f64, OrderStack, Order>,
+    order_map: HashMap<String, (Side, f64)>,
     len: usize,
     items_processed: usize,
     error_msgs: HashSet<String>,
@@ -34,7 +36,7 @@ pub struct LimitOrderbook {
     outliers: usize,
 }
 
-/// OrderStack is a FIFO deque
+/// OrderStack is a FIFO stack
 pub struct OrderStack(VecDeque<Order>);
 
 /// Struct representing a single limit order pre-list-insertion
@@ -151,14 +153,14 @@ impl LimitOrderbook {
         match side {
             Side::Bids => {
                 self.bids.iter().rev().scan(0.0, |cumsum, node| Option::from({
-                    *cumsum += node.key * node.value.cum_order_size();
-                    (node.key, node.value.cum_order_size(), cumsum.clone())
+                    *cumsum += node.key * node.value.size();
+                    (node.key, node.value.size(), cumsum.clone())
                 })).collect()
             },
             Side::Asks => {
                 self.asks.iter().scan(0.0, |cumsum, node| Option::from({
-                    *cumsum += node.key * node.value.cum_order_size();
-                    (node.key, node.value.cum_order_size(), cumsum.clone())
+                    *cumsum += node.key * node.value.size();
+                    (node.key, node.value.size(), cumsum.clone())
                 })).collect()
                 // println!("rust ask levels \n {:?}", result);
                 // result
@@ -232,8 +234,8 @@ impl LimitOrderbook {
     /// Perform checks
     pub fn check(&mut self) {
         let mut error_msgs: HashSet<String> = HashSet::new();
-        error_msgs = self.bids.check_pointer_validity(error_msgs);
-        error_msgs = self.asks.check_pointer_validity(error_msgs);
+        error_msgs = self.bids.check(error_msgs);
+        error_msgs = self.asks.check(error_msgs);
 
         if !self.bids.is_balanced() {
             error_msgs.insert("Bids are not balanced!".to_string());
@@ -421,9 +423,9 @@ impl LimitOrderbook {
 pub struct Iter<'a> {
     side: Side,
     // current_node: Option<(&'a f64, &'a OrderStack)>,
-    current_node: Option<&'a Node<f64>>,
-    bid_tree_iter: Peekable<crate::avl_tree_py::Iter<'a, f64>>,
-    ask_tree_iter: Peekable<crate::avl_tree_py::Iter<'a, f64>>,
+    current_node: Option<&'a Node<f64, OrderStack>>,
+    bid_tree_iter: Peekable<avl_tree::Iter<'a, f64, OrderStack, Order>>,
+    ask_tree_iter: Peekable<avl_tree::Iter<'a, f64, OrderStack, Order>>,
     stack_iter: Option<std::collections::vec_deque::Iter<'a, Order>>,
 }
 
@@ -458,7 +460,9 @@ impl<'a> Iterator for Iter<'a> {
                         // println!("current_node is None. Moving to asks tree...");
                         self.side = Side::Asks;
                         self.current_node = self.ask_tree_iter.next();
-                        self.stack_iter = Some(self.current_node.unwrap().value.0.iter());
+                        if let Some(node) = self.current_node {
+                            self.stack_iter = Some(node.value.0.iter());
+                        }
                     }
                 }
 
@@ -533,13 +537,32 @@ impl OrderStack {
     }
 
     /// Return cumulative order size
-    pub fn cum_order_size(&self) -> f64 {
+    pub fn size(&self) -> f64 {
         self.0.iter().fold(0.0, |sum, order| sum + order.size)
     }
 
     /// Return order stack's size
     pub fn len(&self) -> usize { self.0.len() }
 
+}
+
+impl Collection for OrderStack { type Item = Order; }
+
+impl PushBack for OrderStack {
+    type Output = ();
+    fn push_back(&mut self, element: Self::Item) -> Self::Output {
+        type Item = Order;
+        type Output = ();
+        self.push_back(element)
+    }
+}
+
+impl New for OrderStack {
+    fn new() -> Self { OrderStack::new() }
+}
+
+impl Len for OrderStack {
+    fn len(&self) -> usize { self.len() }
 }
 
 #[pymethods]

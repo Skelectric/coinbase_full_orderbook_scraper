@@ -13,7 +13,7 @@ def configure_logger(
     logger.remove()  # remove default logger
 
     if level not in {"CRITICAL", "WARNING", "INFO", "DEBUG", "TRACE"}:
-        level = "DEBUG"
+        level = "INFO"
 
     # add file logger set to DEBUG level
     if log_to_file:

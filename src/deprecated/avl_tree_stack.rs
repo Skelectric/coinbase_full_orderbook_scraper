@@ -1,8 +1,8 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
-// #![allow(unused_mut)]
+#![allow(unused_mut)]
 #![allow(unused_imports)]
-// #![allow(unused_assignments)]
+#![allow(unused_assignments)]
 
 // standard library
 use std::fmt::{Debug, Display};
@@ -1240,7 +1240,7 @@ impl<K> Node<K>
             match children {
                 Children::None => {
                     // println!("no children >");
-                    let line = format!("{:?}x{:?}/{:?}", &node.key, &node.value.cum_order_size().round(), &node.value.len());
+                    let line = format!("{:?}x{:?}/{:?}", &node.key, &node.value.size().round(), &node.value.len());
                     let width = line.len();
                     let height = 1;
                     let middle = width / 2;
@@ -1250,7 +1250,7 @@ impl<K> Node<K>
                     // println!("left child >");
                     let (lines, n, p, x) = Node::display_aux(&(*node.left.unwrap().as_ptr()));
                     // println!("back to {}", &node.key);
-                    let s = format!("{:?}x{:?}/{:?}", &node.key, &node.value.cum_order_size().round(), &node.value.len());
+                    let s = format!("{:?}x{:?}/{:?}", &node.key, &node.value.size().round(), &node.value.len());
                     let u = s.len();
                     let first_line = " ".repeat(x + 1) + &"_".repeat(n - x - 1) + &s;
                     let second_line = " ".repeat(x) + &"/" + &" ".repeat(n - x - 1 + u);
@@ -1264,7 +1264,7 @@ impl<K> Node<K>
                     // println!("right child >");
                     let (lines, n, p, x) = Node::display_aux(&(*node.right.unwrap().as_ptr()));
                     // println!("back to {}", &node.key);
-                    let s = format!("{:?}x{:?}/{:?}", &node.key, &node.value.cum_order_size().round(), &node.value.len());
+                    let s = format!("{:?}x{:?}/{:?}", &node.key, &node.value.size().round(), &node.value.len());
                     let u = s.len();
                     let first_line = s + &"_".repeat(x) + &" ".repeat(n - x);
                     let second_line = " ".repeat(u + x) + &r"\" + &" ".repeat(n - x - 1);
@@ -1280,7 +1280,7 @@ impl<K> Node<K>
                     // println!("now {}'s right >", &node.key);
                     let (mut right, m, q, y) = Node::display_aux(&(*node.right.unwrap().as_ptr()));
                     // println!("back to {}", &node.key);
-                    let s = format!("{:?}x{:?}/{:?}", &node.key, &node.value.cum_order_size().round(), &node.value.len());
+                    let s = format!("{:?}x{:?}/{:?}", &node.key, &node.value.size().round(), &node.value.len());
                     let u = s.len();
                     let first_line = " ".repeat(x + 1) + &"_".repeat(n - x - 1) + &s + &"_".repeat(y) + &" ".repeat(m - y);
                     let second_line = " ".repeat(x) + &"/" + &" ".repeat(n - x - 1 + u + y) + &r"\" + &" ".repeat(m - y - 1);
