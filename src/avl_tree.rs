@@ -5,7 +5,7 @@
 // #![allow(unused_assignments)]
 
 // standard library
-use std::fmt::{Debug, Display};
+use std::fmt::{Debug, Display, Formatter};
 use std::iter::zip;
 use std::cmp::{max, Ordering};
 use std::collections::HashSet;
@@ -1143,6 +1143,15 @@ impl<K, V, Z> Drop for AVLTree<K, V, Z>
     }
 }
 
+impl<K, V, Z> Display for AVLTree<K, V, Z>
+    where K: Display + Debug + PartialOrd + Clone + ToString,
+          V: Collection<Item=Z> + PushBack + New + Len,
+          Z: Default {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display().join("\n"))
+    }
+}
+
 impl<K, V> Node<K, V>
     where K: Display + Debug + PartialOrd + Clone + ToString,
           V: Collection + PushBack + New + Len, {
@@ -1295,7 +1304,7 @@ mod tests {
     // use lazy_static::lazy_static;
     // use std::sync::Mutex;
     // use std::mem::swap;
-    use crate::orderbook_avl_tree::{OrderStack, Order};
+    use crate::orderbook::{OrderStack, Order};
 
     // lazy_static! {
     //     static ref AVL_TREE: Mutex<AVLTree<i32, Option<&'static str>>> = Mutex::new(AVLTree::new());

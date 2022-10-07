@@ -12,6 +12,10 @@ target/
 Cargo.lock
 .github/
 
+# non-release-ready files
+/deprecated/
+/src/hide/
+
 # Compiled source #
 ###################
 *.com
@@ -49,3 +53,4 @@ Cargo.lock
 .Trashes
 ehthumbs.db
 Thumbs.db
+

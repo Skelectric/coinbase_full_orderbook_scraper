@@ -33,7 +33,6 @@ elif sys.platform == 'darwin':
 # ======================================================================================
 # Script Parameters
 
-AUTO_RESTART = False
 LOG_TO_FILE = False
 
 WEBHOOK_ONLY = False
@@ -349,5 +348,3 @@ if __name__ == '__main__':
 
     logger.info(f"Elapsed time = {module_timer.elapsed(_format='hms')}")
 
-    if AUTO_RESTART:
-        os.execv(sys.executable, ['python'] + sys.argv)
