@@ -1,13 +1,11 @@
 
 ## About The Project
 
-This is a Coinbase 'full' channel (level 3) orderbook scraping bot created primarily as a learning experience by somebody without 
+This is a Coinbase 'full' channel (level 3) orderbook scraper created primarily as a learning experience by somebody without 
 a formal education in computer science or software engineering.
 
 The code has not been audited or looked-over by any external party, and is very likely to be labelled a spaghetti code disaster by
-more experienced developers. Despite that, I'm proud of what I have created and what I've learned to be able to build this.
-
-Similarly, despite integration of Rust for the most computationally-intensive functions, memory-safety and thread-safety is not guaranteed 
+more experienced developers. Similarly, despite integration of Rust for the most computationally-intensive functions, memory-safety and thread-safety is not guaranteed 
 nor expected. For example, the orderbook's entirely-custom AVL-tree implementation relies heavily on unsafe Rust, and although 
 it has passed the unit tests I wrote for it, it fails Miri's experimental stack borrowing checks.
 
