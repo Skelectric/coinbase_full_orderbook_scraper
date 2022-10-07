@@ -39,7 +39,7 @@ the right to abandon the roadmap I outlined below.
   to a hardcoded delay value, I would love to hear it!
 - Saving deserialized orderbook snapshot and update messages as compressed json.gz files.
   - Loading saved snapshot and update messages into the script. This was useful for testing the script using deterministic inputs, 
-  - but may also be useful for backtesting if this script is ever incorporated as a data feed into a broader trading framework. 
+  but may also be useful for backtesting if this script is ever incorporated as a data feed into a broader trading framework. 
 - Comprehensive logging with the help of Loguru.
 - Saving matches and candles into CSVs with the help of Pandas.
   
